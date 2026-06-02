@@ -14,15 +14,18 @@ import AIInstructionsPage from './features/settings/AIInstructionsPage'
 import About from './pages/About'
 import { initRecorder, cleanup } from './services/recorder'
 import { initTheme } from './stores/theme'
+import { initAiEnabled } from './stores/aiEnabled'
 import { getSetting, setSetting } from './services/store'
 import { runAutoUpdate } from './features/update/autoUpdate'
 import UpdateDialog from './features/update/UpdateDialog'
+import * as bridge from './services/bridge'
 
 export default function App() {
   const [showWelcome, setShowWelcome] = useState(false)
 
   useEffect(() => {
     void initTheme()
+    void initAiEnabled()
     initRecorder()
     void runAutoUpdate()
 
@@ -40,6 +43,8 @@ export default function App() {
   const handleWelcomeComplete = () => {
     setShowWelcome(false)
     void setSetting('onboardingVersion', __APP_VERSION__)
+    // 向导完成后通知 Rust 端重新加载快捷键配置
+    bridge.notifyShortcutsChanged()
   }
 
   return (

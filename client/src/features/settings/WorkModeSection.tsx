@@ -8,20 +8,20 @@ import type { WorkMode } from '@/services/transcription'
 const modes: Array<{ value: WorkMode; label: string; desc: string; privacy: string; icon: LucideIcon; iconColor: string }> = [
   {
     value: 'local', label: '本地模式',
-    desc: '语音识别完全在本机运行',
-    privacy: '不开启 AI 时数据完全在本地。开启 AI 后文本会发送到 AI 服务润色。',
+    desc: '语音识别完全在本机运行，无需联网',
+    privacy: '不开启 AI 整理时数据全程留在本地；开启后文本会发送给 AI 整理。',
     icon: Monitor, iconColor: 'text-primary',
   },
   {
     value: 'cloud_api', label: '云 API 模式',
-    desc: '直接调用云端 ASR 和 AI 接口',
+    desc: '使用你自己的云服务商密钥',
     privacy: '音频和文本会发送到你配置的云服务商处理。',
     icon: Globe, iconColor: 'text-primary',
   },
   {
     value: 'server', label: '服务器模式',
     desc: '连接自部署的远程服务器',
-    privacy: '音频发送到服务器推理后不会保留，仅保存在客户端本地。',
+    privacy: '音频发送到服务器处理后不保留，仅本地保存结果。',
     icon: HardDrive, iconColor: 'text-primary',
   },
 ]

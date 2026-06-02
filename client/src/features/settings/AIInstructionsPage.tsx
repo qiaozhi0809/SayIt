@@ -84,7 +84,10 @@ export default function AIInstructionsPage() {
 
   return (
     <div className="mx-auto max-w-4xl">
-      <h1 className="mb-6 text-2xl font-bold">{'AI \u6307\u4ee4'}</h1>
+      <h1 className="mb-2 text-2xl font-bold">AI 整理</h1>
+      <p className="mb-6 text-sm text-muted-foreground">
+        配置 AI 如何整理识别出的文字（校对开关、提示词预设、按应用的规则）。选择使用哪家 AI，请前往「AI 供应商」。
+      </p>
 
       <div className="space-y-6">
         <AIProofreadToggle />

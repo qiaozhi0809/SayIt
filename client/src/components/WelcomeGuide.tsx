@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Mic, Sparkles, Globe, ArrowRight, ArrowLeft, CheckCircle2, AlertCircle, Keyboard } from 'lucide-react'
 import { Card, CardContent } from '@/components/ui/card'
 import { getSetting, setSetting } from '@/services/store'
@@ -92,12 +92,16 @@ export default function WelcomeGuide({ onComplete }: WelcomeGuideProps) {
   // 热键确认步骤的状态
   const [keyConfirmed, setKeyConfirmed] = useState(false)
   const [keyPressed, setKeyPressed] = useState(false)
+  const keyPressedRef = useRef(false)
+  const hfKeyRef = useRef('AltRight')
+  const settingsDirtyRef = useRef(false)
 
   useEffect(() => {
     getSetting('shortcutHandsFree', 'AltRight').then((k) => {
       const key = k as string
       setHfKey(key)
       setHfLabel(KEY_MAP[key] || key)
+      hfKeyRef.current = key
     })
     const mode = getWorkMode()
     setWorkMode(mode)
@@ -107,40 +111,88 @@ export default function WelcomeGuide({ onComplete }: WelcomeGuideProps) {
   }, [])
 
   // 热键确认步骤：监听按键按下和松开，同时抑制录音系统响应热键
+  // 只依赖 step，避免 hfKey 变化导致 effect 反复运行和钩子反复重启
   useEffect(() => {
     if (step !== 2) return
     setPttSuppressed(true)
-    let lastCode = hfKey
+    const pressedKeyCodeRef = { current: '' } // 当前按住的键
+
+    const confirmKey = (code: string) => {
+      const label = KEY_MAP[code] || code
+      // 保存到 ref，避免 state 更新触发 effect 重启
+      hfKeyRef.current = code
+      settingsDirtyRef.current = true
+      // 更新 UI 状态（state 更新不会触发 effect 重建，因为 state 不在依赖里）
+      setHfKey(code)
+      setHfLabel(label)
+      setKeyPressed(true)
+      keyPressedRef.current = true
+      pressedKeyCodeRef.current = code
+      setKeyConfirmed(true)
+    }
+
+    const releaseKey = () => {
+      if (keyPressedRef.current) {
+        keyPressedRef.current = false
+        setKeyPressed(false)
+      }
+      pressedKeyCodeRef.current = ''
+    }
+
+    // 路径 1：webview 能收到的按键（右 Ctrl 等）
     const onDown = (e: KeyboardEvent) => {
       e.preventDefault()
       const code = e.code
-      const label = KEY_MAP[code]
-      if (label) {
-        lastCode = code
-        setHfKey(code)
-        setHfLabel(label)
-        setKeyPressed(true)
+      if (KEY_MAP[code] && pressedKeyCodeRef.current !== code) {
+        confirmKey(code)
       }
     }
     const onUp = (e: KeyboardEvent) => {
       e.preventDefault()
-      if (keyPressed) {
-        setKeyPressed(false)
-        setKeyConfirmed(true)
-        void (async () => {
-          await setSetting('shortcutHandsFree', lastCode)
-          bridge.notifyShortcutsChanged()
-        })()
+      if (pressedKeyCodeRef.current === e.code) {
+        releaseKey()
       }
     }
+
+    // 路径 2：被 Rust 钩子拦截的按键（右 Alt）—— keyup 时触发
+    const unlistenHf = bridge.listen('toggle-hands-free', () => {
+      // Rust 端只在 keyup 时 emit，模拟"按下-松开"的视觉反馈
+      confirmKey(hfKeyRef.current || 'AltRight')
+      setTimeout(() => releaseKey(), 150)
+    })
+
+    // 路径 3：PTT 键 keydown/keyup
+    const unlistenPttDown = bridge.listen('ptt-down', (event: unknown) => {
+      const payload = event as { payload?: { pttSetting?: string } }
+      const setting = payload?.payload?.pttSetting
+      if (setting && KEY_MAP[setting] && pressedKeyCodeRef.current !== setting) {
+        confirmKey(setting)
+      }
+    })
+    const unlistenPttUp = bridge.listen('ptt-up', () => {
+      releaseKey()
+    })
+
     window.addEventListener('keydown', onDown)
     window.addEventListener('keyup', onUp)
     return () => {
       window.removeEventListener('keydown', onDown)
       window.removeEventListener('keyup', onUp)
       setPttSuppressed(false)
+      unlistenHf.then((fn) => fn())
+      unlistenPttDown.then((fn) => fn())
+      unlistenPttUp.then((fn) => fn())
+
+      // 离开 Step 2 时统一保存设置并重配置键盘钩子
+      if (settingsDirtyRef.current) {
+        settingsDirtyRef.current = false
+        void (async () => {
+          await setSetting('shortcutHandsFree', hfKeyRef.current)
+          bridge.notifyShortcutsChanged()
+        })()
+      }
     }
-  }, [step, keyPressed, hfKey])
+  }, [step])
 
   // 试一试步骤：监听按键修改快捷键
   useEffect(() => {
@@ -312,13 +364,13 @@ export default function WelcomeGuide({ onComplete }: WelcomeGuideProps) {
               <CardContent className="p-4">
                 <p className="mb-2 text-sm font-medium">{canTest ? '语音输入测试' : '语音测试'}</p>
                 {canTest && (
-                  <p className="mb-2 text-xs text-muted-foreground">请先点击下方文本框聚焦光标，然后按 {hfLabel} 开始说话，再按一次停止</p>
+                  <p className="mb-2 text-xs text-muted-foreground">按一下 {hfLabel} 开始说话，再按一下自动插入文本</p>
                 )}
                 <textarea
                   value={testText}
                   onChange={(e) => setTestText(e.target.value)}
                   placeholder={canTest
-                    ? `点击这里，然后按 ${hfLabel} 开始说话...`
+                    ? `按 ${hfLabel} 开始说话，再按一次插入文本到这里...`
                     : '当前模式暂不支持在此测试。完成向导后，可在设置中配置语音引擎，然后在任意应用中使用。'}
                   className="w-full resize-none rounded-lg border border-input-border bg-input-bg p-3 text-sm leading-relaxed placeholder:text-muted-foreground/40 focus:border-input-focus-border focus:outline-none"
                   rows={4}
@@ -326,7 +378,7 @@ export default function WelcomeGuide({ onComplete }: WelcomeGuideProps) {
                 />
                 {!canTest && (
                   <p className="mt-2 text-xs text-muted-foreground">
-                    提示：完成向导后，前往「语音引擎」或「AI 服务」配置后即可在任何应用中按 {hfLabel} 使用
+                    提示：完成向导后，前往「语音引擎」或「AI 供应商」配置后即可在任何应用中按 {hfLabel} 使用
                   </p>
                 )}
               </CardContent>

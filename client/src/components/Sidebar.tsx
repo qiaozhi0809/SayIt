@@ -8,9 +8,9 @@ import { getWorkMode } from '@/services/transcription'
 const primaryNavItems = [
   { to: '/', icon: Home, label: '首页' },
   { to: '/history', icon: Clock, label: '历史' },
-  { to: '/voice-engine', icon: AudioLines, label: '语音识别' },
-  { to: '/ai-instructions', icon: Wand2, label: 'AI 指令' },
-  { to: '/ai-service', icon: Sparkles, label: 'AI 服务' },
+  { to: '/voice-engine', icon: AudioLines, label: '语音引擎' },
+  { to: '/ai-instructions', icon: Wand2, label: 'AI 整理' },
+  { to: '/ai-service', icon: Sparkles, label: 'AI 供应商' },
   { to: '/hotwords', icon: BookOpen, label: '热词' },
 ]
 

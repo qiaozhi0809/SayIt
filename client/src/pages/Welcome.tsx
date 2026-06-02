@@ -307,7 +307,7 @@ export default function Welcome() {
                 />
                 {!canTest && (
                   <p className="mt-2 text-xs text-muted-foreground">
-                    提示：完成向导后，前往「语音引擎」或「AI 服务」配置后即可在任何应用中按住 {pttLabel} 使用
+                    提示：完成向导后，前往「语音引擎」或「AI 供应商」配置后即可在任何应用中按住 {pttLabel} 使用
                   </p>
                 )}
               </CardContent>

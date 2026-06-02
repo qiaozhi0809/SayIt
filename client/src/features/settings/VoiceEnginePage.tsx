@@ -1,4 +1,4 @@
-// 语音引擎设置页面 — 工作模式 + ASR 模型/供应商 + AI 校对
+// 语音引擎设置页面 — 工作模式 + ASR 识别服务配置 + 识别测试
 
 import { useEffect, useState } from 'react'
 import { getSetting, setSetting } from '@/services/store'
@@ -31,6 +31,9 @@ export default function VoiceEnginePage() {
   return (
     <div className="mx-auto max-w-4xl">
       <h1 className="mb-4 text-2xl font-bold">语音引擎</h1>
+      <p className="mb-6 text-sm text-muted-foreground">
+        选择语音转文字的运行方式，并配置对应的识别服务。
+      </p>
 
       <div className="space-y-6">
         <WorkModeSection value={workMode} onChange={(m) => void handleWorkModeChange(m)} />
