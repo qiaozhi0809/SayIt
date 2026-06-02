@@ -71,6 +71,20 @@ export const BUILTIN_APP_RULES: AppPromptRule[] = [
       windowTitleIncludes: ['cursor'],
     },
   },
+  {
+    id: 'notepad',
+    appId: 'notepad',
+    name: '记事本',
+    builtin: true,
+    enabled: true,
+    priority: 70,
+    presetId: 'intent',
+    promptAppend: '面向 Windows 记事本，适合随手记录的纯文本。输出纯文本，不要使用 Markdown 标记或特殊格式符号。',
+    matcher: {
+      processNames: ['notepad.exe'],
+      windowTitleIncludes: ['记事本', 'notepad'],
+    },
+  },
 ]
 
 export function createDefaultUserStats(): UserStats {

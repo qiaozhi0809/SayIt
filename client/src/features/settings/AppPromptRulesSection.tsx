@@ -103,7 +103,7 @@ export default function AppPromptRulesSection({
         <div>
           <h2 className="text-lg font-semibold">应用 Prompt 规则</h2>
           <p className="mt-1 text-xs text-muted-foreground">
-            根据当前输入应用自动切换或增强 Prompt。现阶段内置 Teams、Outlook、Kiro、VSCode、Cursor。
+            根据当前输入应用自动切换或增强 Prompt。现阶段内置 Teams、Outlook、Kiro、VSCode、Cursor、记事本。
           </p>
         </div>
 
