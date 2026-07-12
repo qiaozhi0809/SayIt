@@ -46,7 +46,7 @@ function shouldMirrorPayload(payload: unknown): boolean {
     if (level !== 'info') return false
 
     return source === 'recorder' && /(开始录音|停止录音|进入 processing|收到 final|注入成功|注入失败|处理超时|展示兜底卡片)/.test(message)
-      || source === 'websocket' && /(连接关闭|连接超时|发送 start 失败|发送 stop 失败)/.test(message)
+      || source === 'websocket' && /(连接关闭|连接超时|发送 start 失败|发送 stop 失败|开始连接|连接成功|重连成功|收到 ready|disconnect)/.test(message)
       || source === 'backend'
   }
 
@@ -62,7 +62,7 @@ function shouldKeepRuntimeEvent(event: RuntimeEvent): boolean {
   if (event.level === 'error' || event.level === 'warn') return true
   if (event.source === 'backend') return true
   if (event.source === 'websocket') {
-    return /(连接关闭|连接超时|发送 start 失败|发送 stop 失败)/.test(event.message)
+    return /(连接关闭|连接超时|发送 start 失败|发送 stop 失败|开始连接|连接成功|重连成功|收到 ready|disconnect)/.test(event.message)
   }
   if (event.source === 'recorder') {
     return /(开始录音|停止录音|进入 processing|收到 final|外部文本注入成功|外部文本注入失败|处理超时|展示兜底卡片)/.test(event.message)

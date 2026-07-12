@@ -57,14 +57,14 @@ export function updateOverlay(data: unknown) {
 
 // ─── Paste / Context ───
 
-export function pasteText(text: string, hwnd?: string, focusHwnd?: string) {
+export function pasteText(text: string, hwnd?: string, focusHwnd?: string, restoreClipboard?: boolean) {
   return invoke<{
     ok: boolean
     strategy?: string
     reason?: string
     detail?: string
     attempts?: Array<{ strategy: string; ok: boolean; reason?: string; detail?: string }>
-  }>('paste_text', { text, hwnd: hwnd || null, focusHwnd: focusHwnd || null })
+  }>('paste_text', { text, hwnd: hwnd || null, focusHwnd: focusHwnd || null, restoreClipboard: restoreClipboard ?? false })
 }
 
 export function getProbeResult() {

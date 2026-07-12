@@ -24,9 +24,11 @@ pub fn paste_text(
     text: String,
     hwnd: Option<String>,
     focus_hwnd: Option<String>,
+    restore_clipboard: Option<bool>,
     app: AppHandle,
     window_state: State<WindowState>,
 ) -> Result<PasteResult, String> {
+    let restore_clipboard = restore_clipboard.unwrap_or(false);
     let result = match hwnd.as_deref() {
         Some(h) if !h.is_empty() && h != "0" => {
             let target_val = h.parse::<isize>().unwrap_or(0);
@@ -37,11 +39,11 @@ pub fn paste_text(
             crate::commands::system::write_log_line(
                 &format!("[RUST] [paste] pre-probed hwnd target={} focus={}", target_val, focus_val)
             );
-            inject::inject_text_to_hwnd(&text, target_val, focus_val)
+            inject::inject_text_to_hwnd(&text, target_val, focus_val, restore_clipboard)
         }
         _ => {
             crate::commands::system::write_log_line("[RUST] [paste] no pre-probed hwnd, fallback to inject_text");
-            inject::inject_text(&text)
+            inject::inject_text(&text, restore_clipboard)
         }
     };
 

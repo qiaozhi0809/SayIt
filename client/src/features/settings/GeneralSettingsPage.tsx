@@ -28,6 +28,7 @@ export default function GeneralSettingsPage() {
   const [volumeLevel, setVolumeLevel] = useState<MicVolumeLevel>('idle')
   const [micError, setMicError] = useState('')
   const [muteSystemAudio, setMuteSystemAudio] = useState(false)
+  const [protectClipboard, setProtectClipboard] = useState(true)
   const [pttKey, setPttKey] = useState('AltLeft')
   const [handsFreeKey, setHandsFreeKey] = useState('Alt+L')
   const [audioRetentionEnabled, setAudioRetentionEnabled] = useState(true)
@@ -43,6 +44,7 @@ export default function GeneralSettingsPage() {
     getSetting('autoCheckUpdate', true).then((value) => setAutoCheckUpdate(Boolean(value)))
     getSetting('selectedMic', '').then(setSelectedMic)
     getSetting('muteSystemAudioWhileRecording', false).then((value) => setMuteSystemAudio(Boolean(value)))
+    getSetting('protectClipboard', true).then((value) => setProtectClipboard(Boolean(value)))
     getSetting('shortcutPTT', 'AltRight').then((value) => setPttKey(value as string))
     getSetting('shortcutHandsFree', 'Alt+L').then((value) => setHandsFreeKey(value as string))
     getSetting('audioRetentionEnabled', true).then((value) => setAudioRetentionEnabled(Boolean(value)))
@@ -62,6 +64,7 @@ export default function GeneralSettingsPage() {
   const toggleAutoCheckUpdate = async () => { const next = !autoCheckUpdate; setAutoCheckUpdate(next); await setSetting('autoCheckUpdate', next) }
   const handleMicChange = async (deviceId: string) => { setSelectedMic(deviceId); await setSetting('selectedMic', deviceId); await refreshRecorderSettings() }
   const toggleMuteSystemAudio = async () => { const next = !muteSystemAudio; setMuteSystemAudio(next); await setSetting('muteSystemAudioWhileRecording', next); await refreshRecorderSettings() }
+  const toggleProtectClipboard = async () => { const next = !protectClipboard; setProtectClipboard(next); await setSetting('protectClipboard', next); await refreshRecorderSettings() }
   const toggleAudioRetention = async () => { const next = !audioRetentionEnabled; setAudioRetentionEnabled(next); await setSetting('audioRetentionEnabled', next) }
   const toggleReadySound = async () => { const next = !readySoundEnabled; setReadySoundEnabled(next); await setSetting('readySoundEnabled', next); await refreshRecorderSettings() }
   const handleAudioRetentionDaysChange = async (value: number) => { setAudioRetentionDays(value); await setSetting('audioRetentionDays', value) }
@@ -178,6 +181,13 @@ export default function GeneralSettingsPage() {
                 <p className="text-xs text-muted-foreground">按住说话期间临时静音外放，避免被麦克风录入</p>
               </div>
               <Switch checked={muteSystemAudio} onChange={() => void toggleMuteSystemAudio()} />
+            </div>
+            <div className="flex items-center justify-between border-t border-border pt-4">
+              <div>
+                <p className="text-sm font-medium">插入文本后保护剪贴板</p>
+                <p className="text-xs text-muted-foreground">插入完成后自动还原为插入前的剪贴板内容，避免占用剪贴板</p>
+              </div>
+              <Switch checked={protectClipboard} onChange={() => void toggleProtectClipboard()} />
             </div>
           </CardContent>
         </Card>

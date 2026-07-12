@@ -26,7 +26,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 use windows::Win32::System::Threading::GetCurrentThreadId;
 #[cfg(windows)]
 use windows::Win32::System::DataExchange::{
-    OpenClipboard, CloseClipboard, EmptyClipboard, SetClipboardData,
+    OpenClipboard, CloseClipboard, EmptyClipboard, SetClipboardData, GetClipboardData,
 };
 #[cfg(windows)]
 use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
@@ -48,7 +48,7 @@ pub struct InjectResult {
 }
 
 #[cfg(windows)]
-pub fn inject_text_to_hwnd(text: &str, target_hwnd_val: isize, focus_hwnd_val: isize) -> InjectResult {
+pub fn inject_text_to_hwnd(text: &str, target_hwnd_val: isize, focus_hwnd_val: isize, restore_clipboard: bool) -> InjectResult {
     let target = HWND(target_hwnd_val as *mut _);
     let focus = if focus_hwnd_val != 0 {
         HWND(focus_hwnd_val as *mut _)
@@ -56,11 +56,11 @@ pub fn inject_text_to_hwnd(text: &str, target_hwnd_val: isize, focus_hwnd_val: i
         target
     };
 
-    unsafe { do_inject(target, focus, text) }
+    unsafe { do_inject(target, focus, text, restore_clipboard) }
 }
 
 #[cfg(windows)]
-pub fn inject_text(text: &str) -> InjectResult {
+pub fn inject_text(text: &str, restore_clipboard: bool) -> InjectResult {
     let ctx = context::capture_context("inject");
 
     if ctx.hwnd.is_empty() || ctx.hwnd == "0" {
@@ -87,15 +87,15 @@ pub fn inject_text(text: &str) -> InjectResult {
 
     let target_hwnd = ctx.hwnd.parse::<isize>().unwrap_or(0);
     let focus_hwnd = ctx.focus_hwnd.parse::<isize>().unwrap_or(0);
-    inject_text_to_hwnd(text, target_hwnd, focus_hwnd)
+    inject_text_to_hwnd(text, target_hwnd, focus_hwnd, restore_clipboard)
 }
 
 #[cfg(not(windows))]
-pub fn inject_text_to_hwnd(_text: &str, _target: isize, _focus: isize) -> InjectResult {
+pub fn inject_text_to_hwnd(_text: &str, _target: isize, _focus: isize, _restore_clipboard: bool) -> InjectResult {
     InjectResult { ok: false, strategy: None, reason: Some("not_windows".to_string()), detail: None, uncertain: false }
 }
 #[cfg(not(windows))]
-pub fn inject_text(_text: &str) -> InjectResult {
+pub fn inject_text(_text: &str, _restore_clipboard: bool) -> InjectResult {
     InjectResult { ok: false, strategy: None, reason: Some("not_windows".to_string()), detail: None, uncertain: false }
 }
 
@@ -214,8 +214,20 @@ const WM_COMMAND: u32 = 0x0111;
 const ID_CONSOLE_PASTE: usize = 0xFFF1;
 
 /// Main injection: try WM_PASTE first, then SendInput Ctrl+V as fallback.
+///
+/// `restore_clipboard`: 若为 true，在写入文本前先保存剪贴板原有文本内容，
+/// 待粘贴指令发出、目标程序有机会读取剪贴板之后（延迟一小段时间，在独立线程里），
+/// 再把剪贴板还原为原内容，避免用户之前复制的东西被覆盖丢失。
 #[cfg(windows)]
-unsafe fn do_inject(target: HWND, focus: HWND, text: &str) -> InjectResult {
+unsafe fn do_inject(target: HWND, focus: HWND, text: &str, restore_clipboard: bool) -> InjectResult {
+    // 保存原剪贴板内容（在写入新文本之前）。剪贴板本来为空/非文本时为 None，
+    // 还原时会清空剪贴板而不是留着我们刚插入的文本。
+    let previous_clipboard_text = if restore_clipboard {
+        native_get_clipboard_text()
+    } else {
+        None
+    };
+
     // Step 1: Write text to clipboard
     let clipboard_ok = set_clipboard_with_retry(text, 5, 30);
     if !clipboard_ok {
@@ -226,6 +238,21 @@ unsafe fn do_inject(target: HWND, focus: HWND, text: &str) -> InjectResult {
             detail: Some("failed after 5 retries".to_string()),
             uncertain: false,
         };
+    }
+
+    // 延迟还原剪贴板：粘贴指令有的是同步的（WM_PASTE/console_paste 在返回前已处理完），
+    // 有的是异步的（SendInput 是 fire-and-forget，目标程序稍后才读取剪贴板），
+    // 统一在独立线程里等待一段安全时间再还原，不阻塞本函数的返回。
+    if restore_clipboard {
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(400));
+            unsafe {
+                match &previous_clipboard_text {
+                    Some(t) => { let _ = set_clipboard_with_retry(t, 3, 20); }
+                    None => { let _ = native_clear_clipboard(); }
+                }
+            }
+        });
     }
 
     // Step 1.5: 经典控制台窗口（conhost，类名 ConsoleWindowClass）——用控制台
@@ -522,4 +549,44 @@ unsafe fn native_set_clipboard_text(text: &str) -> bool {
 #[cfg(windows)]
 pub unsafe fn set_clipboard_with_retry_pub(text: &str, max_retries: u32, retry_delay_ms: u64) -> bool {
     set_clipboard_with_retry(text, max_retries, retry_delay_ms)
+}
+
+/// 清空剪贴板（还原场景：插入前剪贴板本来就没有文本内容）。
+#[cfg(windows)]
+unsafe fn native_clear_clipboard() -> bool {
+    if OpenClipboard(HWND(std::ptr::null_mut())).is_err() { return false; }
+    let ok = EmptyClipboard().is_ok();
+    let _ = CloseClipboard();
+    ok
+}
+
+/// 读取剪贴板当前的 Unicode 文本内容（CF_UNICODETEXT=13）。
+/// 用于「插入前保存、插入后还原」——避免用户之前复制的内容被覆盖丢失。
+/// 剪贴板为空、或内容不是文本（图片/文件等）时返回 None，不做处理即等价于「插入前剪贴板本来就没有可还原的文本」。
+#[cfg(windows)]
+unsafe fn native_get_clipboard_text() -> Option<String> {
+    if OpenClipboard(HWND(std::ptr::null_mut())).is_err() { return None; }
+
+    let result = (|| -> Option<String> {
+        let handle = GetClipboardData(13).ok()?; // CF_UNICODETEXT
+        let hmem = windows::Win32::Foundation::HGLOBAL(handle.0);
+        let locked = GlobalLock(hmem);
+        if locked.is_null() { return None; }
+
+        // Unicode 文本以 NUL 结尾，逐 u16 扫描找长度（内存块可能比字符串长）
+        let mut len = 0usize;
+        let ptr = locked as *const u16;
+        loop {
+            if *ptr.add(len) == 0 { break; }
+            len += 1;
+            if len > 10_000_000 { break; } // 防御性上限，避免异常内存导致死循环
+        }
+        let slice = std::slice::from_raw_parts(ptr, len);
+        let text = String::from_utf16_lossy(slice);
+        let _ = GlobalUnlock(hmem);
+        Some(text)
+    })();
+
+    let _ = CloseClipboard();
+    result
 }

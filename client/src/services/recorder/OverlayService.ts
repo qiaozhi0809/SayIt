@@ -44,9 +44,19 @@ export class OverlayService {
         this.readySoundCtx = new AudioContext()
       }
       const ctx = this.readySoundCtx
+      // AudioContext 新建或长时间无操作后常处于 suspended 状态（浏览器自动播放/省电策略）。
+      // resume() 是异步的，若不等它完成就 start()，振荡器可能被静默丢弃或延迟——
+      // 这正是「第一次按免提键听不到提示音，过一会又听不到」的根因。
       if (ctx.state === 'suspended') {
-        void ctx.resume()
+        ctx.resume().then(() => this.emitReadyTone(ctx)).catch(() => { /* ignore */ })
+      } else {
+        this.emitReadyTone(ctx)
       }
+    } catch { /* ignore */ }
+  }
+
+  private emitReadyTone(ctx: AudioContext) {
+    try {
       const osc = ctx.createOscillator()
       const gain = ctx.createGain()
       osc.connect(gain)

@@ -169,19 +169,24 @@ export default function CloudAPISection() {
   }
 
   async function saveAndTestAsr() {
-    // 先保存
-    const group = asrKeyGroup(asrProvider)
-    await setSetting(`cloudAsr.${group}.apiKey`, asrApiKey)
-    await setSetting(`cloudAsr.${group}.appId`, asrAppId)
-    await setSetting('cloudAsr.apiKey', asrApiKey)
-    await setSetting('cloudAsr.appId', asrAppId)
-    if (asrProvider.startsWith('qwen_omni')) {
-      await setSetting('cloudAsr.omniSystemPrompt', omniSystemPrompt)
-    }
-
-    // 再测试
+    if (asrTesting) return // 防止双击重复触发
     setAsrTesting(true)
     setAsrMessage('')
+
+    // 先保存（互相独立，并行写入而非依次 await）
+    const group = asrKeyGroup(asrProvider)
+    const savePromises = [
+      setSetting(`cloudAsr.${group}.apiKey`, asrApiKey),
+      setSetting(`cloudAsr.${group}.appId`, asrAppId),
+      setSetting('cloudAsr.apiKey', asrApiKey),
+      setSetting('cloudAsr.appId', asrAppId),
+    ]
+    if (asrProvider.startsWith('qwen_omni')) {
+      savePromises.push(setSetting('cloudAsr.omniSystemPrompt', omniSystemPrompt))
+    }
+    await Promise.all(savePromises)
+
+    // 再测试
     try {
       const isQwenOmni = isQwenOmniProvider(asrProvider)
       const qwenOmniModel = resolveQwenOmniModel(asrProvider)

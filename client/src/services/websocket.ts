@@ -52,6 +52,19 @@ let ws: WebSocket | null = null
 let callbacks: WSCallbacks = {}
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null
 let intentionalClose = false
+/** 连接建立的时间戳，用于日志里计算连接存活时长 */
+let connectStartMs = 0
+let openedAtMs = 0
+
+/** 抓取一小段调用栈（去掉本函数与 Error 头两行），用于日志里定位「谁触发了连接/关闭」。 */
+function shortCallerStack(): string {
+  const raw = new Error().stack || ''
+  return raw
+    .split('\n')
+    .slice(2, 5)
+    .map((l) => l.trim().replace(/^at\s+/, ''))
+    .join(' <- ')
+}
 
 // --- 重连退避 ---
 let reconnectAttempts = 0
@@ -141,10 +154,19 @@ export function connect(cbs: WSCallbacks): Promise<void> {
   callbacks = cbs
 
   if (ws?.readyState === WebSocket.OPEN) {
+    // 已经连上，直接复用（connect 幂等）。这是每次开始录音的正常路径，不记日志避免刷屏；
+    // 真正异常的连接场景由 开始连接/连接成功/主动关闭/关闭未就绪连接 等日志覆盖。
     return Promise.resolve()
   }
 
   if (ws) {
+    // 上一条连接还在（可能仍在 CONNECTING，或刚 open 尚未标记就绪）。这里会主动关掉它再重连，
+    // 这正是「连上几秒就被自己关掉、且没发 start」最可能的元凶——记录下来看看是谁触发的。
+    const prevState = ws.readyState
+    addRuntimeEvent('warn', 'websocket', 'connect() 关闭上一条未就绪连接并重连', {
+      prevReadyState: prevState, // 0=CONNECTING 1=OPEN 2=CLOSING 3=CLOSED
+      caller: shortCallerStack(),
+    })
     intentionalClose = true
     try {
       ws.close()
@@ -158,6 +180,8 @@ export function connect(cbs: WSCallbacks): Promise<void> {
     intentionalClose = false
     updateGlobalState('connecting')
     const wsUrl = getWSUrl()
+    connectStartMs = Date.now()
+    addRuntimeEvent('info', 'websocket', '开始连接', { url: wsUrl, caller: shortCallerStack() })
 
     const socket = new WebSocket(wsUrl)
     socket.binaryType = 'arraybuffer'
@@ -178,7 +202,12 @@ export function connect(cbs: WSCallbacks): Promise<void> {
 
     socket.onopen = () => {
       clearTimeout(timeout)
+      openedAtMs = Date.now()
       updateGlobalState('connected')
+      const wasReconnect = reconnectAttempts > 0
+      addRuntimeEvent('info', 'websocket', wasReconnect ? `重连成功（第 ${reconnectAttempts} 次尝试）` : '连接成功', {
+        elapsedMs: connectStartMs ? openedAtMs - connectStartMs : undefined,
+      })
       reconnectAttempts = 0
       if (reconnectTimer) {
         clearTimeout(reconnectTimer)
@@ -196,6 +225,11 @@ export function connect(cbs: WSCallbacks): Promise<void> {
 
         switch (msg.type) {
           case 'ready':
+            addRuntimeEvent('info', 'websocket', '收到 ready', {
+              connectionId: msg.connection_id,
+              asr: msg.asr,
+              llm: msg.llm,
+            })
             callbacks.onReady?.({
               connectionId: msg.connection_id,
               asr: msg.asr,
@@ -257,6 +291,8 @@ export function connect(cbs: WSCallbacks): Promise<void> {
       ws = null
       updateGlobalState('disconnected')
 
+      const aliveMs = openedAtMs ? Date.now() - openedAtMs : undefined
+      const sentStart = sessionStarted
       endSessionIfNeeded()
 
       if (!intentionalClose) {
@@ -264,15 +300,32 @@ export function connect(cbs: WSCallbacks): Promise<void> {
         addRuntimeEvent('warn', 'websocket', `连接关闭 code=${ev.code} reason=${ev.reason || '-'}，${Math.round(delay / 1000)}s 后重连`, {
           code: ev.code,
           attempt: reconnectAttempts + 1,
+          aliveMs,
+          sentStart,
         })
         reconnectAttempts++
         reconnectTimer = setTimeout(() => connect(callbacks), delay)
+      } else {
+        // 主动关闭这一路以前是完全静默的（切换供应商/地址、connect() 替换旧连接、disconnect()）。
+        // 现在也记一条，标明是客户端主动关的，便于区分「服务端踢」还是「客户端自己关」。
+        addRuntimeEvent('warn', 'websocket', `主动关闭连接 code=${ev.code} reason=${ev.reason || '-'}`, {
+          code: ev.code,
+          aliveMs,
+          sentStart,
+          caller: shortCallerStack(),
+        })
       }
+      openedAtMs = 0
     }
   })
 }
 
 export function disconnect() {
+  addRuntimeEvent('info', 'websocket', 'disconnect() 被调用', {
+    hadSocket: !!ws,
+    readyState: ws?.readyState,
+    caller: shortCallerStack(),
+  })
   intentionalClose = true
   reconnectAttempts = 0
   stopHeartbeat()

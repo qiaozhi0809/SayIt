@@ -1,5 +1,6 @@
 // Provider 管理器 — 根据 workMode 返回对应的 TranscriptionProvider
 
+import { invoke } from '@tauri-apps/api/core'
 import { getSetting } from '../store'
 import { addRuntimeEvent } from '../debugLog'
 import { ServerProvider } from './ServerProvider'
@@ -57,6 +58,16 @@ export async function switchProvider(mode: WorkMode): Promise<TranscriptionProvi
       currentProvider.disconnect()
     } catch {
       // ignore
+    }
+  }
+
+  // 离开本地模式时释放 sherpa-onnx recognizer 占用的内存（几百 MB ~ 数 GB），
+  // 否则切到云 API / 服务器模式后本地模型仍常驻到应用退出。
+  if (currentMode === 'local' && mode !== 'local') {
+    try {
+      await invoke('unload_local_model')
+    } catch (err) {
+      addRuntimeEvent('warn', 'transcription', '释放本地模型失败', { error: String(err) })
     }
   }
 

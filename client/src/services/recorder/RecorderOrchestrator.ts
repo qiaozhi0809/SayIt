@@ -111,6 +111,8 @@ export class RecorderOrchestrator {
   private cachedMicId = ''
   /** 是否在录音期间静音系统输出（防外放被麦克风回采）。默认关闭。 */
   private cachedMuteSystemAudio = false
+  /** 插入文本后是否自动还原剪贴板为插入前内容。默认开启。 */
+  private cachedProtectClipboard = true
   /** 标记本次录音是否已施加系统静音，用于配对恢复。 */
   private systemMuteApplied = false
   /** 延迟静音定时器（等提示音播完再静音）。 */
@@ -348,10 +350,23 @@ export class RecorderOrchestrator {
     this.provider.disconnect()
   }
 
+  /** 仅更新 AI 整理开关的缓存值，无 IPC/热词/语言等全量刷新。
+   *  供标题栏/设置页的开关按钮使用，避免快速切换时卡顿。 */
+  setAiEnabledCache(next: boolean) {
+    this.cachedAiEnabled = next
+  }
+
+  /** 仅更新当前润色模式（preset）的缓存值，无 IPC/热词/语言等全量刷新。
+   *  供设置页点击切换润色模式使用，避免快速切换时卡顿。 */
+  setActivePresetCache(id: string) {
+    this.cachedActivePresetId = id
+  }
+
   async refreshRuntimeSettings() {
     const [
       micId,
       muteSystemAudio,
+      protectClipboard,
       presets,
       activePresetId,
       aiEnabled,
@@ -360,6 +375,7 @@ export class RecorderOrchestrator {
     ] = await Promise.all([
       getSetting('selectedMic', ''),
       getSetting('muteSystemAudioWhileRecording', false),
+      getSetting('protectClipboard', true),
       getPromptPresets(),
       getActivePresetId(),
       getSetting('aiEnabled', false),
@@ -369,6 +385,7 @@ export class RecorderOrchestrator {
 
     this.cachedMicId = String(micId || '')
     this.cachedMuteSystemAudio = Boolean(muteSystemAudio)
+    this.cachedProtectClipboard = Boolean(protectClipboard)
     this.cachedPresets = presets
     this.cachedActivePresetId = activePresetId
     this.cachedAiEnabled = Boolean(aiEnabled)
@@ -376,36 +393,31 @@ export class RecorderOrchestrator {
     this.cachedUserStats = userStats
     await this.overlayService.refreshSettings()
 
-    // Load hotwords from local store
-    try {
-      const [rawSetWords, rawSetActive, rawCustomThemes, rawCustomThemeActive] = await Promise.all([
+    // 热词 / 服务器语言 / 客户端运行时信息彼此独立，并行加载而非依次 await，
+    // 减少本函数的总耗时（每次切换 AI 整理开关等都会触发这里）。
+    const [hotwordsResult, languageResult, runtimeInfoResult] = await Promise.allSettled([
+      Promise.all([
         getSetting(BUILTIN_SET_WORDS_KEY, {}),
         getSetting(BUILTIN_SET_ACTIVE_KEY, {}),
         getSetting(CUSTOM_THEMES_KEY, []),
         getSetting(CUSTOM_THEME_ACTIVE_KEY, {}),
-      ])
-      const setWords = normalizeBuiltinSetWords(rawSetWords as Record<string, unknown>)
-      const setActive = normalizeBuiltinSetActive(rawSetActive as Record<string, unknown>)
-      const themes = normalizeCustomThemes(rawCustomThemes)
-      const themeActive = normalizeCustomThemeActive(rawCustomThemeActive as Record<string, unknown>, themes)
-      this.cachedHotwords = composeHotwords([], setWords, setActive, themes, themeActive)
-    } catch {
-      this.cachedHotwords = []
-    }
+      ]).then(([rawSetWords, rawSetActive, rawCustomThemes, rawCustomThemeActive]) => {
+        const setWords = normalizeBuiltinSetWords(rawSetWords as Record<string, unknown>)
+        const setActive = normalizeBuiltinSetActive(rawSetActive as Record<string, unknown>)
+        const themes = normalizeCustomThemes(rawCustomThemes)
+        const themeActive = normalizeCustomThemeActive(rawCustomThemeActive as Record<string, unknown>, themes)
+        return composeHotwords([], setWords, setActive, themes, themeActive)
+      }),
+      getSetting('server.language', 'auto').then((lang) => {
+        const l = lang as string
+        return l && l !== 'auto' ? l : ''
+      }),
+      bridge.getClientRuntimeInfo(),
+    ])
 
-    // Load server language setting
-    try {
-      const lang = await getSetting('server.language', 'auto') as string
-      this.cachedLanguage = lang && lang !== 'auto' ? lang : ''
-    } catch {
-      this.cachedLanguage = ''
-    }
-
-    try {
-      this.cachedClientRuntimeInfo = await bridge.getClientRuntimeInfo()
-    } catch {
-      this.cachedClientRuntimeInfo = null
-    }
+    this.cachedHotwords = hotwordsResult.status === 'fulfilled' ? hotwordsResult.value : []
+    this.cachedLanguage = languageResult.status === 'fulfilled' ? languageResult.value : ''
+    this.cachedClientRuntimeInfo = runtimeInfoResult.status === 'fulfilled' ? runtimeInfoResult.value : null
   }
 
   /** 工作模式或服务地址变更后强制重连 provider。
@@ -728,7 +740,7 @@ export class RecorderOrchestrator {
 
     // Target was editable → paste (pass probe so Rust uses pre-probed hwnd)
     const pasteStartedAt = Date.now()
-    const result = await this.pasteService.pasteText(text, probe)
+    const result = await this.pasteService.pasteText(text, probe, this.cachedProtectClipboard)
     if (result.ok) {
       addRuntimeEvent('info', 'recorder', '外部文本注入成功', {
         strategy: result.strategy,

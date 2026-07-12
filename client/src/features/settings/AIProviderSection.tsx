@@ -121,10 +121,14 @@ export default function AIProviderSection() {
 
   // 加载指定供应商的配置
   async function loadProviderConfig(provider: string) {
-    let url = await getSetting(aiSettingKey(provider, 'apiUrl'), '') as string
-    const key = await getSetting(aiSettingKey(provider, 'apiKey'), '') as string
-    let model = await getSetting(aiSettingKey(provider, 'model'), '') as string
-    const modelsStr = await getSetting(aiSettingKey(provider, 'models'), '') as string
+    const [urlRaw, key, modelRaw, modelsStr] = await Promise.all([
+      getSetting(aiSettingKey(provider, 'apiUrl'), '') as Promise<string>,
+      getSetting(aiSettingKey(provider, 'apiKey'), '') as Promise<string>,
+      getSetting(aiSettingKey(provider, 'model'), '') as Promise<string>,
+      getSetting(aiSettingKey(provider, 'models'), '') as Promise<string>,
+    ])
+    let url = urlRaw
+    let model = modelRaw
     let models = modelsStr ? modelsStr.split(',').map(s => s.trim()).filter(Boolean) : []
     // 新用户首次使用：如果没有 URL，自动填充默认地址
     const defaultUrl = DEFAULT_URLS[provider]
@@ -198,14 +202,17 @@ export default function AIProviderSection() {
     const currentModel = auto?.model ?? aiModel
     const currentModels = auto?.models ?? aiModels
 
-    await setSetting(aiSettingKey(aiProvider, 'apiUrl'), aiApiUrl)
-    await setSetting(aiSettingKey(aiProvider, 'apiKey'), aiApiKey)
-    await setSetting(aiSettingKey(aiProvider, 'model'), currentModel)
-    await setSetting(aiSettingKey(aiProvider, 'models'), currentModels.join(','))
-    await setSetting('cloudAi.provider', aiProvider)
-    await setSetting('cloudAi.apiUrl', aiApiUrl)
-    await setSetting('cloudAi.apiKey', aiApiKey)
-    await setSetting('cloudAi.model', currentModel)
+    // 互相独立的写入，并行执行而非依次 await
+    await Promise.all([
+      setSetting(aiSettingKey(aiProvider, 'apiUrl'), aiApiUrl),
+      setSetting(aiSettingKey(aiProvider, 'apiKey'), aiApiKey),
+      setSetting(aiSettingKey(aiProvider, 'model'), currentModel),
+      setSetting(aiSettingKey(aiProvider, 'models'), currentModels.join(',')),
+      setSetting('cloudAi.provider', aiProvider),
+      setSetting('cloudAi.apiUrl', aiApiUrl),
+      setSetting('cloudAi.apiKey', aiApiKey),
+      setSetting('cloudAi.model', currentModel),
+    ])
     setAiMessage('已保存')
     return currentModel
   }
@@ -241,11 +248,12 @@ export default function AIProviderSection() {
   }
 
   async function testConnection() {
-    const effectiveModel = await saveConfig()
+    if (aiTesting) return // 防止双击重复触发
     setAiTesting(true)
     setAiMessage('')
     setAiDetail('')
     try {
+      const effectiveModel = await saveConfig()
       const result = await invoke<TestResult>('test_ai_connection', {
         config: { provider: aiProvider, api_url: aiApiUrl, api_key: aiApiKey, model: effectiveModel },
       })

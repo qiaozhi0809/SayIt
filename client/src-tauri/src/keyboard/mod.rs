@@ -95,6 +95,9 @@ struct HookSharedState {
     /// stale hard-timeout timers from previous presses.
     ptt_generation: AtomicU64,
     hands_free_active: AtomicBool,
+    /// 免提键是否处于"已按下"状态。只有先收到过真实（未被 synthetic 过滤）的 keydown，
+    /// 随后的 keyup 才允许触发 toggle。用于挡掉远程桌面等场景下的"孤儿 keyup"幻影按键。
+    hf_key_down: AtomicBool,
     /// VK codes for hands-free toggle key (empty = not using hook for hands-free)
     hf_vk_codes: Vec<u32>,
     hf_setting: String,
@@ -108,7 +111,7 @@ enum HookAction {
     PttDown { vk: u32, gen: u64 },
     PttUp { vk: u32 },
     HfToggle { vk: u32 },
-    Diag { vk: u32, msg_name: &'static str, flags: u32 },
+    Diag { vk: u32, msg_name: &'static str, flags: u32, scan_code: u32 },
 }
 
 // Thread-local storage for the hook callback
@@ -151,6 +154,7 @@ impl KeyboardHookManager {
             ptt_key_down: AtomicBool::new(false),
             ptt_generation: AtomicU64::new(0),
             hands_free_active: AtomicBool::new(false),
+            hf_key_down: AtomicBool::new(false),
             hf_vk_codes,
             hf_setting: hf_setting.to_string(),
             app_handle: app.clone(),
@@ -252,9 +256,9 @@ impl KeyboardHookManager {
         thread::spawn(move || {
             while let Ok(action) = action_rx.recv() {
                 match action {
-                    HookAction::Diag { vk, msg_name, flags } => {
+                    HookAction::Diag { vk, msg_name, flags, scan_code } => {
                         crate::commands::system::write_log_line(
-                            &format!("[RUST] [hook-diag] vk={} msg={} flags=0x{:X}", vk, msg_name, flags)
+                            &format!("[RUST] [hook-diag] vk={} msg={} flags=0x{:X} scanCode=0x{:X}", vk, msg_name, flags, scan_code)
                         );
                     }
                     HookAction::PttDown { vk, gen } => {
@@ -419,6 +423,25 @@ unsafe extern "system" fn low_level_keyboard_proc(
         let vk = kb.vkCode;
         let msg = w_param.0 as u32;
 
+        // 过滤 Windows 合成的"幻影 Alt"：鼠标点击跨会话边界（如从本机点进远程桌面
+        // 窗口）触发焦点切换时，Windows 会自动合成一个 Alt keydown/keyup 用于清理
+        // 菜单导航状态，与用户真实按键几乎无法区分——唯二的区别是：
+        //   1) LLKHF_INJECTED (0x10) / LLKHF_LOWER_IL_INJECTED (0x02) 标志位被置位；
+        //   2) scanCode 通常为 0（真实键盘按键的 scanCode 非零）。
+        // 命中任一条件即认为是系统合成按键，直接放行给系统处理，不当作用户按键。
+        const LLKHF_INJECTED: u32 = 0x10;
+        const LLKHF_LOWER_IL_INJECTED: u32 = 0x02;
+
+        // 保存本次事件的 flags/scanCode，供下方「命中热键时」的诊断日志使用。
+        let kb_flags = kb.flags.0;
+        let kb_scan_code = kb.scanCode;
+
+        let is_synthetic = (kb.flags.0 & (LLKHF_INJECTED | LLKHF_LOWER_IL_INJECTED)) != 0
+            || kb.scanCode == 0;
+        if is_synthetic {
+            return CallNextHookEx(None, n_code, w_param, l_param);
+        }
+
         // ── CRITICAL: This callback MUST return within ~200ms or Windows
         // will silently remove the hook. NO blocking operations allowed.
         // All logging and emit are offloaded via try_send to a dispatcher thread.
@@ -440,6 +463,19 @@ unsafe extern "system" fn low_level_keyboard_proc(
                 let is_hf_key = !state.hf_vk_codes.is_empty()
                     && state.hf_vk_codes.contains(&vk)
                     && !is_ptt_key; // PTT takes priority if same key
+
+                // ── 诊断：仅在「当前配置的 PTT/免提热键」被按下时记录 flags/scanCode ──
+                // 只记热键本身（不记正常打字的 Ctrl/Shift 等），量可控；用于抓远程桌面
+                // 场景下误触发热键的那次事件特征，和真实按键对比后再对症过滤幻影键。
+                if (is_ptt_key || is_hf_key) && (msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN) {
+                    HOOK_ACTION_TX.with(|tx| {
+                        if let Some(sender) = tx.borrow().as_ref() {
+                            let _ = sender.try_send(HookAction::Diag {
+                                vk, msg_name: "hotkey-down", flags: kb_flags, scan_code: kb_scan_code,
+                            });
+                        }
+                    });
+                }
 
                 if is_ptt_key {
                     let is_down = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN;
@@ -478,19 +514,29 @@ unsafe extern "system" fn low_level_keyboard_proc(
                     }
                 }
 
-                // 免提键：keyup 时触发 toggle（避免和 keydown repeat 冲突）
+                // 免提键：keyup 时触发 toggle（避免和 keydown repeat 冲突）。
+                // ⚠️ 必须校验配对的 keydown：远程桌面等场景下，鼠标点击跨会话边界会让
+                // Windows 合成幻影 Alt——其 keydown 常带 INJECTED 标志被 synthetic 过滤器挡掉，
+                // 但残留的 keyup 会漏进来。若在 keyup 上无条件 toggle，就会被这种"孤儿 keyup"
+                // 误触发（且一次点击可能爆发多次）。因此只有先记录过真实 keydown（hf_key_down=true）
+                // 的 keyup 才 toggle。
                 if is_hf_key {
                     let is_up = msg == WM_KEYUP || msg == WM_SYSKEYUP;
                     let is_down = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN;
                     if is_down {
                         consumed = true; // 吞掉 keydown 防止系统处理
+                        state.hf_key_down.store(true, Ordering::SeqCst);
                     }
                     if is_up {
-                        HOOK_ACTION_TX.with(|tx| {
-                            if let Some(sender) = tx.borrow().as_ref() {
-                                let _ = sender.try_send(HookAction::HfToggle { vk });
-                            }
-                        });
+                        // 只有配对过真实 keydown 才 toggle；孤儿 keyup（幻影）直接忽略。
+                        let had_down = state.hf_key_down.swap(false, Ordering::SeqCst);
+                        if had_down {
+                            HOOK_ACTION_TX.with(|tx| {
+                                if let Some(sender) = tx.borrow().as_ref() {
+                                    let _ = sender.try_send(HookAction::HfToggle { vk });
+                                }
+                            });
+                        }
                     }
                 }
             }

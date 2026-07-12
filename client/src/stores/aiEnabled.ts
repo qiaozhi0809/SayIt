@@ -3,7 +3,7 @@
 // 采用 useSyncExternalStore 模式（与 connectionStatus 一致，无外部依赖）
 
 import { getSetting, setSetting } from '@/services/store'
-import { refreshRecorderSettings } from '@/services/recorder'
+import { setAiEnabledCache } from '@/services/recorder'
 
 type Listener = () => void
 
@@ -36,14 +36,15 @@ export function subscribeAiEnabled(listener: Listener): () => void {
   return () => listeners.delete(listener)
 }
 
-/** 设置开关状态：更新内存状态 + 通知订阅者 + 持久化 + 刷新录音器缓存 */
+/** 设置开关状态：更新内存状态 + 通知订阅者 + 持久化 + 同步录音器缓存（轻量，无 IPC 全量刷新）。
+ *  持久化写入放到后台执行，不阻塞 UI 反馈，避免快速切换时卡顿。 */
 export async function setAiEnabled(next: boolean): Promise<void> {
   if (next !== currentValue) {
     currentValue = next
     emitChange()
   }
-  await setSetting('aiEnabled', next)
-  await refreshRecorderSettings()
+  setAiEnabledCache(next)
+  void setSetting('aiEnabled', next)
 }
 
 /** 切换开关状态 */

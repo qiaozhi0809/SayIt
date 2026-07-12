@@ -45,7 +45,7 @@ _MAX_WS_TOTAL = 200
 _MAX_WS_PER_IP = 10
 # 接收空闲超时：客户端每 30s 发一次 ping；超过此时长无任何消息即视为死连接并回收，
 # 避免半开/异常掉线的连接长期占用 per-IP 配额（不再依赖 OS TCP 超时，可能长达几分钟）。
-_WS_IDLE_TIMEOUT_SEC = 90
+_WS_IDLE_TIMEOUT_SEC = 300  # 5 分钟；客户端 30s 心跳理论够用，放宽是为短暂网络抖动/系统休眠留容错空间
 # WebSocket 关闭码：不同拒绝/关闭原因用不同 code，客户端与日志据此区分排查
 _WS_CLOSE_SERVER_FULL = 1013     # 服务器整体到达容量上限（标准“稍后再试”）
 _WS_CLOSE_PER_IP_LIMIT = 4029    # 该客户端 IP 并发连接过多（对应 HTTP 429 语义）

@@ -70,15 +70,6 @@ impl WindowState {
             let ping_emit_err = overlay.emit("overlay-ping", seq).err()
                 .map(|e| format!("{:?}", e));
 
-            write_log_line(&format!(
-                "[overlay-diag] show begin handle=present layout={:?} fallback={} was_visible={} \
-                 outer_pos={} outer_size={} target_bounds={:?} monitor={}x{}@{:.2} \
-                 ping_seq={} last_pong_age_ms={} ping_emit_err={:?}",
-                layout, is_fallback, was_visible,
-                outer_pos, outer_size, bounds, mon_w, mon_h, mon_scale,
-                seq, pong_age_ms, ping_emit_err,
-            ));
-
             let pos_err = overlay.set_position(tauri::Position::Logical(
                 tauri::LogicalPosition::new(bounds.0, bounds.1)
             )).err().map(|e| format!("{:?}", e));
@@ -89,21 +80,29 @@ impl WindowState {
             let aot_err = overlay.set_always_on_top(true).err().map(|e| format!("{:?}", e));
             set_overlay_interactivity(&overlay, is_fallback);
 
-            // Re-snapshot to confirm visibility actually changed
-            let now_visible = overlay.is_visible().unwrap_or(false);
-            let now_outer_pos = overlay.outer_position()
-                .map(|p| format!("{},{}", p.x, p.y))
-                .unwrap_or_else(|_| "err".to_string());
-
             let any_err = pos_err.is_some() || size_err.is_some()
                 || show_err.is_some() || aot_err.is_some();
-            let level = if any_err { "WARN" } else { "INFO" };
-            write_log_line(&format!(
-                "[overlay-diag] show end [{}] now_visible={} now_outer_pos={} \
-                 pos_err={:?} size_err={:?} show_err={:?} aot_err={:?}",
-                level, now_visible, now_outer_pos,
-                pos_err, size_err, show_err, aot_err,
-            ));
+
+            // 常规显示（无错误）不再记录日志，避免每次录音刷屏；
+            // 仅在出错时记录完整诊断信息（含 ping/pong 存活探测），便于排查悬浮窗异常。
+            if any_err {
+                let now_visible = overlay.is_visible().unwrap_or(false);
+                let now_outer_pos = overlay.outer_position()
+                    .map(|p| format!("{},{}", p.x, p.y))
+                    .unwrap_or_else(|_| "err".to_string());
+                write_log_line(&format!(
+                    "[overlay-diag] show FAILED layout={:?} fallback={} was_visible={} \
+                     outer_pos={} outer_size={} target_bounds={:?} monitor={}x{}@{:.2} \
+                     ping_seq={} last_pong_age_ms={} ping_emit_err={:?} \
+                     now_visible={} now_outer_pos={} \
+                     pos_err={:?} size_err={:?} show_err={:?} aot_err={:?}",
+                    layout, is_fallback, was_visible,
+                    outer_pos, outer_size, bounds, mon_w, mon_h, mon_scale,
+                    seq, pong_age_ms, ping_emit_err,
+                    now_visible, now_outer_pos,
+                    pos_err, size_err, show_err, aot_err,
+                ));
+            }
         } else {
             write_log_line(&format!(
                 "[overlay-diag] show begin handle=MISSING layout={:?} fallback={} \
@@ -125,18 +124,16 @@ impl WindowState {
 
         if let Some(overlay) = app.get_webview_window("overlay") {
             set_overlay_interactivity(&overlay, false);
-            let was_visible = overlay.is_visible().unwrap_or(false);
             let hide_err = overlay.hide().err().map(|e| format!("{:?}", e));
-            write_log_line(&format!(
-                "[overlay-diag] hide prev_layout={:?} was_visible={} hide_err={:?}",
-                prev_layout, was_visible, hide_err,
-            ));
-        } else {
-            write_log_line(&format!(
-                "[overlay-diag] hide handle=MISSING prev_layout={:?}",
-                prev_layout,
-            ));
+            // 常规隐藏（无错误）不再记录日志，避免每次录音都刷屏；只在隐藏出错时记录。
+            if let Some(err) = hide_err {
+                write_log_line(&format!(
+                    "[overlay-diag] hide FAILED prev_layout={:?} hide_err={}",
+                    prev_layout, err,
+                ));
+            }
         }
+        // overlay 句柄不存在时无需隐藏，也无需记录（属正常情况：从未显示过或已销毁）。
     }
 
     pub fn update_overlay_state(&self, app: &AppHandle, data: &Value) {

@@ -1,6 +1,6 @@
 use serde::Serialize;
 use serde_json::Value;
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Emitter, State};
 use crate::storage::Storage;
 use std::io::Write;
 use std::sync::Mutex;
@@ -243,24 +243,67 @@ pub fn check_for_updates() -> Result<Value, String> {
     }))
 }
 
-/// 下载更新安装包到临时目录
+#[derive(Serialize, Clone)]
+struct UpdateDownloadProgress {
+    #[serde(rename = "downloadedBytes")]
+    downloaded_bytes: u64,
+    #[serde(rename = "totalBytes")]
+    total_bytes: u64,
+    percent: f64,
+    status: String,
+    error: Option<String>,
+}
+
+fn emit_update_progress(app: &AppHandle, downloaded: u64, total: u64, status: &str, error: Option<&str>) {
+    let percent = if total > 0 {
+        (downloaded as f64 / total as f64 * 100.0).min(100.0)
+    } else {
+        0.0
+    };
+    let _ = app.emit(
+        "update-download-progress",
+        UpdateDownloadProgress {
+            downloaded_bytes: downloaded,
+            total_bytes: total,
+            percent,
+            status: status.to_string(),
+            error: error.map(String::from),
+        },
+    );
+}
+
+/// 下载更新安装包到临时目录，下载过程中通过 update-download-progress 事件上报真实字节进度
 #[tauri::command]
-pub async fn download_update(url: String) -> Result<String, String> {
+pub async fn download_update(app: AppHandle, url: String) -> Result<String, String> {
+    use futures_util::StreamExt;
+    use std::io::Write;
+
     // 必须带 User-Agent：生产环境 AWS WAF 的 NoUserAgent_HEADER 规则会拦截无 UA 的请求（403）
     let client = reqwest::Client::builder()
         .user_agent(concat!("SayIt/", env!("CARGO_PKG_VERSION")))
         .build()
         .map_err(|e| format!("初始化下载客户端失败: {}", e))?;
+
+    emit_update_progress(&app, 0, 0, "downloading", None);
+
     let resp = client
         .get(&url)
         .timeout(std::time::Duration::from_secs(300))
         .send()
         .await
-        .map_err(|e| format!("下载失败: {}", e))?;
+        .map_err(|e| {
+            let msg = format!("下载失败: {}", e);
+            emit_update_progress(&app, 0, 0, "failed", Some(&msg));
+            msg
+        })?;
 
     if !resp.status().is_success() {
-        return Err(format!("下载失败: HTTP {}", resp.status()));
+        let msg = format!("下载失败: HTTP {}", resp.status());
+        emit_update_progress(&app, 0, 0, "failed", Some(&msg));
+        return Err(msg);
     }
+
+    let total = resp.content_length().unwrap_or(0);
 
     // 从 URL 提取文件名
     let filename = url.split('/').last().unwrap_or("SayIt-Setup.exe").to_string();
@@ -268,8 +311,33 @@ pub async fn download_update(url: String) -> Result<String, String> {
     std::fs::create_dir_all(&temp_dir).map_err(|e| format!("创建临时目录失败: {}", e))?;
     let file_path = temp_dir.join(&filename);
 
-    let bytes = resp.bytes().await.map_err(|e| format!("读取数据失败: {}", e))?;
-    std::fs::write(&file_path, &bytes).map_err(|e| format!("写入文件失败: {}", e))?;
+    let mut file = std::fs::File::create(&file_path)
+        .map_err(|e| format!("创建文件失败: {}", e))?;
+
+    let mut downloaded: u64 = 0;
+    let mut stream = resp.bytes_stream();
+    let mut last_emit = std::time::Instant::now();
+
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| {
+            let msg = format!("下载中断: {}", e);
+            emit_update_progress(&app, downloaded, total, "failed", Some(&msg));
+            msg
+        })?;
+        file.write_all(&chunk).map_err(|e| format!("写入文件失败: {}", e))?;
+        downloaded += chunk.len() as u64;
+
+        // 每 200ms 发送一次进度，避免刷屏
+        if last_emit.elapsed().as_millis() >= 200 {
+            emit_update_progress(&app, downloaded, total, "downloading", None);
+            last_emit = std::time::Instant::now();
+        }
+    }
+
+    file.flush().map_err(|e| format!("flush 失败: {}", e))?;
+    drop(file);
+
+    emit_update_progress(&app, downloaded, total.max(downloaded), "completed", None);
 
     Ok(file_path.to_string_lossy().to_string())
 }
@@ -282,16 +350,32 @@ pub fn install_downloaded_update(file_path: String, app: AppHandle) -> Result<()
         return Err("安装包文件不存在".to_string());
     }
 
-    // 启动 NSIS 安装程序（/S 静默安装）
+    // 启动 NSIS 安装程序（/S 静默安装）。静默模式下 NSIS 不会像交互式安装那样
+    // 提供"安装完成后运行"的选项，所以需要自己接管：起一个不依赖当前进程存活的
+    // "看门人" cmd 进程 —— 等安装进程真正退出（文件覆盖完成）后，再拉起新版本
+    // exe（同一路径，currentUser 安装模式下更新会装到原目录）。
+    // 必须等旧进程完全退出后才能让安装程序覆盖 exe 文件（Windows 文件锁），
+    // 所以看门人进程要在本进程之外独立存活，用 cmd /c 包一层 + start /wait。
     #[cfg(target_os = "windows")]
     {
         use std::process::Command;
         const CREATE_NO_WINDOW: u32 = 0x08000000;
-        Command::new(&file_path)
-            .arg("/S")
+
+        let current_exe = std::env::current_exe()
+            .map_err(|e| format!("获取当前程序路径失败: {}", e))?;
+        let exe_str = current_exe.to_string_lossy().to_string();
+
+        // start /wait 会等安装程序进程退出后才继续，/S 走静默安装。
+        // 安装完成后拉起新 exe，带 --open-about 让新实例自动跳转到关于页。
+        let watchdog_cmd = format!(
+            "start /wait \"\" \"{}\" /S && start \"\" \"{}\" --open-about",
+            file_path, exe_str
+        );
+        Command::new("cmd")
+            .args(["/C", &watchdog_cmd])
             .creation_flags(CREATE_NO_WINDOW)
             .spawn()
-            .map_err(|e| format!("启动安装程序失败: {}", e))?;
+            .map_err(|e| format!("启动安装看门人进程失败: {}", e))?;
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -299,7 +383,7 @@ pub fn install_downloaded_update(file_path: String, app: AppHandle) -> Result<()
         return Err("当前平台不支持自动安装".to_string());
     }
 
-    // 退出当前应用
+    // 退出当前应用，让安装程序能够覆盖 exe 文件
     app.exit(0);
     Ok(())
 }

@@ -51,12 +51,13 @@ export class PasteService {
    * Passing the hwnd avoids re-capturing context after PTT release
    * (which may return the wrong foreground window).
    */
-  async pasteText(text: string, probe?: ProbeResult): Promise<PasteResult> {
+  async pasteText(text: string, probe?: ProbeResult, restoreClipboard?: boolean): Promise<PasteResult> {
     try {
       const result = await bridge.pasteText(
         text,
         probe?.hwnd,
         probe?.focusHwnd,
+        restoreClipboard,
       )
       if (!result) return { ok: false, reason: 'no_result' }
       return result as PasteResult

@@ -222,6 +222,7 @@ export default function LocalModeSection() {
   const [selectedModelId, setSelectedModelId] = useState('')
   const [downloadSource, setDownloadSource] = useState('modelscope')
   const [asrLanguage, setAsrLanguage] = useState('auto')
+  const [preloadingModelId, setPreloadingModelId] = useState('')
   const [downloading, setDownloading] = useState<Record<string, DownloadProgress>>({})
 
   useEffect(() => {
@@ -300,9 +301,13 @@ export default function LocalModeSection() {
   }
 
   async function handleSelectModel(modelId: string) {
+    if (preloadingModelId) return // 防止切换/加载中重复触发
     setSelectedModelId(modelId)
+    setPreloadingModelId(modelId)
     await setSetting('localAsr.modelId', modelId)
-    try { await invoke<string>('preload_local_model', { modelId }) } catch { /* ignore */ }
+    try { await invoke<string>('preload_local_model', { modelId }) } catch { /* ignore */ } finally {
+      setPreloadingModelId('')
+    }
   }
 
   const downloadedIds = new Set(downloadedModels.filter((m) => m.complete).map((m) => m.id))
@@ -448,8 +453,12 @@ export default function LocalModeSection() {
                     {isDownloaded ? (
                       <>
                         {!isSelected && (
-                          <Button size="sm" variant="outline" onClick={() => void handleSelectModel(model.id)}>
-                            选择
+                          <Button
+                            size="sm" variant="outline"
+                            disabled={preloadingModelId !== ''}
+                            onClick={() => void handleSelectModel(model.id)}
+                          >
+                            {preloadingModelId === model.id ? '加载中…' : '选择'}
                           </Button>
                         )}
                         <Button size="sm" variant="ghost" onClick={() => setConfirmDeleteId(model.id)}>

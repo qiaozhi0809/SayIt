@@ -14,7 +14,8 @@ export default function UpdateDialog() {
     return onAutoUpdateChange(setState)
   }, [])
 
-  if (state.phase === 'idle' || state.phase === 'checking') return null
+  // 只在正在下载/安装时弹出遮罩；idle/checking/checked（无论有无更新）都不打扰用户
+  if (state.phase !== 'downloading' && state.phase !== 'installing') return null
 
   return (
     <div className="fixed inset-0 z-[200] flex items-center justify-center bg-background/80 backdrop-blur-sm">
@@ -29,8 +30,14 @@ export default function UpdateDialog() {
               正在下载 v{state.version}，请稍候...
             </p>
             <div className="mt-4 h-1.5 w-full overflow-hidden rounded-full bg-muted">
-              <div className="h-full animate-pulse rounded-full bg-primary" style={{ width: '60%' }} />
+              <div
+                className="h-full rounded-full bg-primary transition-all duration-200"
+                style={{ width: `${Math.max(state.downloadPercent ?? 0, 2)}%` }}
+              />
             </div>
+            <p className="mt-2 text-xs text-muted-foreground/60">
+              {Math.round(state.downloadPercent ?? 0)}%
+            </p>
           </div>
         )}
         {state.phase === 'installing' && (

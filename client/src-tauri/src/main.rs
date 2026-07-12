@@ -14,7 +14,7 @@ use storage::Storage;
 use window::WindowState;
 use keyboard::KeyboardHookManager;
 use context::ContextDetector;
-use tauri::Manager;
+use tauri::{Manager, Emitter};
 use tauri::tray::{TrayIconBuilder, MouseButton, MouseButtonState, TrayIconEvent};
 use tauri::menu::{MenuBuilder, MenuItemBuilder};
 
@@ -130,11 +130,18 @@ fn main() {
         .join("sayit.log"));
 
     // Allow self-signed certificates and auto-grant microphone for backend connection (WebView2)
-    // This must be set before any WebView2 instance is created
+    // This must be set before any WebView2 instance is created.
+    // Also disable Chromium's background tab/window throttling: SayIt keeps a long-lived
+    // WebSocket connection alive via a 30s JS heartbeat even when the window is minimized
+    // or not focused. Without these flags, WebView2 throttles setInterval timers in the
+    // background, delaying the heartbeat well past the server's idle timeout and causing
+    // spurious "idle timeout" disconnects while the app is just sitting idle in the tray.
     if std::env::var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS").is_err() {
         std::env::set_var(
             "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
-            "--ignore-certificate-errors --auto-accept-camera-and-microphone-capture",
+            "--ignore-certificate-errors --auto-accept-camera-and-microphone-capture \
+             --disable-backgrounding-occluded-windows --disable-renderer-backgrounding \
+             --disable-background-timer-throttling",
         );
     }
 
@@ -171,11 +178,14 @@ fn main() {
     tauri::Builder::default()
         // 单实例锁：必须作为第一个插件注册。第二次启动时不新开进程，
         // 而是唤起已有窗口，避免两个客户端同时收全局热键、各插一份文本。
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
             if let Some(w) = app.get_webview_window("main") {
                 let _ = w.show();
                 let _ = w.unminimize();
                 let _ = w.set_focus();
+                if args.iter().any(|a| a == "--open-about") {
+                    let _ = w.emit("open-about", ());
+                }
             }
         }))
         .manage(storage)
@@ -191,6 +201,9 @@ fn main() {
             // 开机自启会带 --minimized 参数 → 保持隐藏，静默停留在托盘
             // 用户手动打开则正常显示（窗口配置为 visible:false，需显式 show）
             let launched_minimized = std::env::args().any(|arg| arg == "--minimized");
+            // 自动更新安装完成后，看门人进程会带 --open-about 重新拉起本程序，
+            // 用于自动打开并跳转到关于页，让用户能确认更新已生效。
+            let launched_open_about = std::env::args().any(|arg| arg == "--open-about");
             if let Some(main_window) = app.get_webview_window("main") {
                 let ico_bytes = include_bytes!("../icons/icon.ico");
                 if let Ok(icon) = tauri::image::Image::from_bytes(ico_bytes) {
@@ -201,6 +214,9 @@ fn main() {
                     let _ = main_window.set_focus();
                 } else {
                     log::info!("Launched with --minimized, staying hidden in tray");
+                }
+                if launched_open_about {
+                    let _ = main_window.emit("open-about", ());
                 }
             }
 
@@ -383,6 +399,7 @@ fn main() {
             models::registry::open_model_folder,
             models::local_asr::local_transcribe,
             models::local_asr::preload_local_model,
+            models::local_asr::unload_local_model,
             models::test_audio::run_asr_benchmark,
             models::test_audio::get_test_audio_b64,
         ])

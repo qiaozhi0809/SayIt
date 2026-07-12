@@ -5,10 +5,10 @@ import {
   saveAppPromptRules,
 } from '@/services/personalization/store'
 import type { AppPromptRule } from '@/services/personalization/types'
-import { refreshPreset, refreshRecorderSettings } from '@/services/recorder'
+import { refreshPreset, refreshRecorderSettings, setActivePresetCache } from '@/services/recorder'
 import * as bridge from '@/services/bridge'
 import { useActivePreset } from '@/hooks/useActivePreset'
-import { refreshActivePreset } from '@/stores/activePreset'
+import { refreshActivePreset, setActivePresetKnown } from '@/stores/activePreset'
 import {
   deletePromptPreset,
   getPromptPresets,
@@ -53,10 +53,12 @@ export default function AIInstructionsPage() {
     bridge.notifyShortcutsChanged()
   }
 
-  const handleSelectPreset = async (id: string) => {
-    await setActivePresetId(id)
-    await refreshPreset()
-    await refreshActivePreset()
+  const handleSelectPreset = (id: string) => {
+    // 立即更新 UI 与录音器缓存（无 IPC），持久化写入放到后台，避免快速切换时卡顿
+    const target = presets.find((p) => p.id === id)
+    setActivePresetKnown(id, target?.name || '')
+    setActivePresetCache(id)
+    void setActivePresetId(id)
   }
 
   const handleSavePreset = async (preset: PromptPreset) => {

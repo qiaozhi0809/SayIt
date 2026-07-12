@@ -22,6 +22,9 @@ export const DEFAULTS: Record<string, unknown> = {
   selectedMic: '', // 设备 ID，空字符串 = 系统默认
   muteSystemAudioWhileRecording: false, // 按住说话期间静音系统其他声音（防外放被麦克风回采）。默认关闭
 
+  // ── 文本插入 ──
+  protectClipboard: true, // 插入文本后自动还原剪贴板为插入前内容，避免占用用户剪贴板。默认开启
+
   // ── AI 校对 ──
   aiEnabled: true, // 是否开启 AI 校对。可选: true | false
   aiPromptAppend: '', // 全局附加 prompt

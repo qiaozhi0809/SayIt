@@ -467,6 +467,21 @@ pub async fn preload_local_model(model_id: String) -> Result<String, String> {
     .map_err(|e| format!("预加载异常: {}", e))?
 }
 
+/// 释放本地 ASR 模型占用的内存。切换到云 API / 服务器模式时调用，
+/// 否则 sherpa-onnx recognizer（几百 MB ~ 数 GB）会一直占用到应用退出。
+#[tauri::command]
+pub async fn unload_local_model() -> Result<(), String> {
+    tokio::task::spawn_blocking(|| {
+        let mut cache = CACHE.lock().map_err(|e| format!("锁获取失败: {}", e))?;
+        if let Some(entry) = cache.take() {
+            log::info!("Unloading ASR model: {}", entry.model_id);
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("释放异常: {}", e))?
+}
+
 /// 解析 Silero VAD 模型路径：优先打包资源，兜底模型目录。
 fn resolve_vad_model(app: &tauri::AppHandle) -> Option<std::path::PathBuf> {
     use tauri::Manager;

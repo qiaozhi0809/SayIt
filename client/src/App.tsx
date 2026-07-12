@@ -1,5 +1,6 @@
 ﻿import { useEffect, useState } from 'react'
-import { Routes, Route, Navigate } from 'react-router-dom'
+import { Routes, Route, Navigate, useNavigate } from 'react-router-dom'
+import { listen } from '@tauri-apps/api/event'
 import Sidebar from './components/Sidebar'
 import TitleBar from './components/TitleBar'
 import WelcomeGuide from './components/WelcomeGuide'
@@ -25,7 +26,12 @@ export default function App() {
   const [showWelcome, setShowWelcome] = useState(false)
   // 首次挂载时先不渲染主界面，等 onboarding 检查完成再决定，避免"闪一下主页再进向导"
   const [onboardingChecked, setOnboardingChecked] = useState(false)
+  const navigate = useNavigate()
 
+  // 初始化 + 清理：必须只在挂载/卸载各执行一次。
+  // ⚠️ 依赖数组务必保持为空 []！这里的 cleanup() 会断开 WebSocket，若把会变化的
+  // 值（如 react-router 的 navigate）放进依赖，effect 会反复卸载重装，导致
+  // 「连上→cleanup 断连→重连」的死循环（连上几秒就断、从不发 start）。
   useEffect(() => {
     void initTheme()
     void initAiEnabled()
@@ -42,8 +48,22 @@ export default function App() {
       setOnboardingChecked(true)
     })()
 
-    return () => cleanup()
+    return () => {
+      cleanup()
+    }
   }, [])
+
+  // 自动更新安装完成后，看门人进程会带 --open-about 重新拉起本程序，
+  // Rust 端据此发出 open-about 事件，这里跳转到关于页方便用户确认更新已生效。
+  // 单独一个 effect：它的清理只是取消监听，不会断开连接，所以依赖 navigate 无副作用。
+  useEffect(() => {
+    const unlistenOpenAbout = listen('open-about', () => {
+      navigate('/about')
+    })
+    return () => {
+      void unlistenOpenAbout.then((fn) => fn())
+    }
+  }, [navigate])
 
   const handleWelcomeComplete = () => {
     setShowWelcome(false)
