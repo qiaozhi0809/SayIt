@@ -6,6 +6,9 @@ use futures_util::{SinkExt, StreamExt};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio_tungstenite::tungstenite;
+use tungstenite::client::IntoClientRequest;
+use tungstenite::http::header::{AUTHORIZATION, USER_AGENT};
+use tungstenite::http::HeaderValue;
 
 const MODEL: &str = "qwen3-asr-flash-realtime-2026-02-10";
 
@@ -31,21 +34,29 @@ pub async fn qwen_stream_open(config: AsrProviderConfig, hotwords: Option<Vec<St
 
     let url = format!("wss://dashscope.aliyuncs.com/api-ws/v1/realtime?model={}", MODEL);
 
-    let request = tungstenite::http::Request::builder()
-        .uri(&url)
-        .header("Authorization", format!("Bearer {}", config.api_key))
-        .header("OpenAI-Beta", "realtime=v1")
-        .header("Sec-WebSocket-Key", tungstenite::handshake::client::generate_key())
-        .header("Sec-WebSocket-Version", "13")
-        .header("Connection", "Upgrade")
-        .header("Upgrade", "websocket")
-        .header("Host", "dashscope.aliyuncs.com")
-        .body(())
+    let mut request = url
+        .as_str()
+        .into_client_request()
         .map_err(|e| format!("构建请求失败: {}", e))?;
+    request.headers_mut().insert(
+        AUTHORIZATION,
+        HeaderValue::from_str(&format!("Bearer {}", config.api_key))
+            .map_err(|e| format!("Authorization 请求头无效: {}", e))?,
+    );
+    request.headers_mut().insert(
+        USER_AGENT,
+        HeaderValue::from_static(concat!("SayIt/", env!("CARGO_PKG_VERSION"))),
+    );
 
-    let (mut ws, _) = tokio_tungstenite::connect_async(request)
+    // 让 tungstenite 从 URL 生成标准 WebSocket 握手头，只追加服务要求的鉴权头。
+    // 不再手工重复构造 Host/Upgrade/Sec-WebSocket-*，也不发送当前协议不要求的 OpenAI-Beta。
+    let (mut ws, response) = tokio_tungstenite::connect_async(request)
         .await
         .map_err(|e| format!("WebSocket 连接失败: {}", e))?;
+    crate::commands::system::write_log_line(&format!(
+        "[RUST] [qwen_stream] connected status={} model={}",
+        response.status(), MODEL
+    ));
 
     // 发送 session.update 配置
     let mut input_audio_transcription = serde_json::json!({
@@ -80,13 +91,18 @@ pub async fn qwen_stream_open(config: AsrProviderConfig, hotwords: Option<Vec<St
     .await
     .map_err(|e| format!("发送 session.update 失败: {}", e))?;
 
-    // 等待 session.updated 确认
+    // 等待 session.updated 确认（服务端会先发送 session.created）。
+    let mut session_updated = false;
     while let Some(msg) = ws.next().await {
         let msg = msg.map_err(|e| format!("接收确认失败: {}", e))?;
         if let tungstenite::Message::Text(text) = msg {
             if let Ok(data) = serde_json::from_str::<serde_json::Value>(&text) {
                 let event_type = data.get("type").and_then(|t| t.as_str()).unwrap_or("");
                 if event_type == "session.updated" {
+                    session_updated = true;
+                    crate::commands::system::write_log_line(
+                        "[RUST] [qwen_stream] session updated",
+                    );
                     break;
                 }
                 if event_type == "error" {
@@ -98,6 +114,9 @@ pub async fn qwen_stream_open(config: AsrProviderConfig, hotwords: Option<Vec<St
                 }
             }
         }
+    }
+    if !session_updated {
+        return Err("WebSocket 在 session.updated 前已关闭".to_string());
     }
 
     let mut session = SESSION.lock().await;
@@ -148,6 +167,7 @@ pub async fn qwen_stream_finish() -> Result<String, String> {
 
     // 等待 session.finished，收集转录结果
     let mut final_text = String::new();
+    let mut completed_count = 0usize;
 
     while let Some(msg) = ws.next().await {
         let msg = msg.map_err(|e| format!("接收结果失败: {}", e))?;
@@ -159,6 +179,7 @@ pub async fn qwen_stream_finish() -> Result<String, String> {
                     "conversation.item.input_audio_transcription.completed" => {
                         if let Some(transcript) = data.get("transcript").and_then(|t| t.as_str()) {
                             if !transcript.is_empty() {
+                                completed_count += 1;
                                 if !final_text.is_empty() {
                                     final_text.push_str("，");
                                 }
@@ -167,12 +188,7 @@ pub async fn qwen_stream_finish() -> Result<String, String> {
                         }
                     }
                     "session.finished" => {
-                        // 优先用 session.finished 里的 transcript
-                        if let Some(transcript) = data.get("transcript").and_then(|t| t.as_str()) {
-                            if !transcript.is_empty() {
-                                final_text = transcript.to_string();
-                            }
-                        }
+                        // 最终文本由 completed 事件逐段提供；session.finished 仅表示会话结束。
                         break;
                     }
                     "error" => {
@@ -190,6 +206,12 @@ pub async fn qwen_stream_finish() -> Result<String, String> {
         }
     }
 
+    crate::commands::system::write_log_line(&format!(
+        "[RUST] [qwen_stream] finished completedSegments={} utf8Len={} utf16Len={}",
+        completed_count,
+        final_text.len(),
+        final_text.encode_utf16().count()
+    ));
     let _ = ws.close(None).await;
     *session = None;
 

@@ -230,8 +230,8 @@ export default function CloudAPISection() {
                 ))}
               </select>
             </div>
-            {/* 豆包：App ID 在 API Key 前面（千问/Omni/MiMo 不需要 App ID） */}
-            {asrProvider !== 'qwen' && asrProvider !== 'mimo' && !asrProvider.startsWith('qwen_omni') && (
+            {/* 只有豆包需要 App ID；千问（含流式/Omni）和 MiMo 只需要 API Key */}
+            {asrProvider === 'doubao_v2' && (
             <div>
               <label className="mb-1 block text-sm text-muted-foreground">App ID</label>
               <input
