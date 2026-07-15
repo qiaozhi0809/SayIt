@@ -31,8 +31,7 @@ import {
   startInsertionTargetTracking,
   stopInsertionTargetTracking,
 } from '../textInsertion'
-import { segmentAsrText } from '../textSegmenter'
-import { applyTextReplacements } from '../textReplacement'
+import { applyTextTransforms } from '../textPostProcess'
 import type { ActiveAppContext } from '../../types/appContext'
 import type { ClientRuntimeInfo } from '../../types/appApi'
 import { OverlayService } from './OverlayService'
@@ -1373,10 +1372,10 @@ export class RecorderOrchestrator {
     options: { allowInsertionWhenIdle: boolean; source: 'processing' | 'late_after_timeout' },
   ) {
     // 极速模式下 llmText === asrText（后端未经 LLM 处理时直接复制 asrText）
-    // 此时对文本做智能分段提升可读性
+    // 此时文本可参与智能分段（是否分段由用户开关决定，见 applyTextTransforms）
     const needsSegment = !result.llmText || result.llmText === result.asrText
-    const segmented = needsSegment ? segmentAsrText(result.asrText) : result.llmText
-    const textToPaste = await applyTextReplacements(segmented)
+    const baseText = needsSegment ? result.asrText : result.llmText
+    const textToPaste = await applyTextTransforms(baseText, { segmentable: needsSegment })
     const hasText = Boolean(textToPaste && textToPaste.trim())
     const audioDur = context.audioDurationSec
     const wallSec = context.wallTimeSec > 0 ? context.wallTimeSec : audioDur

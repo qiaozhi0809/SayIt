@@ -19,6 +19,7 @@ export const BUILTIN_SETS: Record<string, { label: string; description: string; 
       'ChatGPT', 'GPT', 'OpenAI', 'Claude', 'DeepSeek', '豆包', 'Gemini',
       'LLM', 'Token', 'Prompt', 'Agent', 'Ollama', '千问', '大模型',
       'OpenClaw', 'ASR', 'Codex', 'Claude Code', 'SayIt', 'Hermes',
+      'Vibe Coding', 'Typeless', 'Vibe',
     ],
   },
 }

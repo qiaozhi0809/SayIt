@@ -102,14 +102,15 @@ export default function TextReplacementSection() {
   const enabledCount = rules.filter((r) => r.enabled).length
 
   return (
-    <div>
-      <p className="mb-4 text-sm text-muted-foreground">
-        识别后自动替换指定文本，例如「安卓说话 → 按住说话」。
-        {rules.length > 0 && (
-          <span className="ml-2">{enabledCount} 条启用 · 共 {rules.length} 条规则</span>
-        )}
-      </p>
-
+    <div className="rounded-lg border border-border">
+      <div className="border-b border-border px-4 py-3">
+        <h2 className="text-lg font-semibold">文本替换</h2>
+        <p className="mt-0.5 text-xs text-muted-foreground">
+          识别后自动替换指定文本，例如「安卓说话 → 按住说话」
+          {rules.length > 0 && `　·　${enabledCount} 条启用 / 共 ${rules.length} 条`}
+        </p>
+      </div>
+      <div className="p-4">
       {/* 添加新规则 — 两列对齐 */}
       {!batchMode && (
         <div className="flex items-center gap-2">
@@ -251,6 +252,7 @@ export default function TextReplacementSection() {
           <p className="text-sm text-muted-foreground">还没有替换规则，在上方添加第一条吧</p>
         </div>
       )}
+      </div>
     </div>
   )
 }

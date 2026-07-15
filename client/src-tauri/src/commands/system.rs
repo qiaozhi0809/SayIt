@@ -63,7 +63,10 @@ fn rotate_if_needed() {
 }
 
 pub fn write_log_line(line: &str) {
-    let mut guard = LOG_FILE.lock().unwrap();
+    // 用 unwrap_or_else 而非 unwrap()：即使这个 Mutex 曾在某次 panic 中被"污染"
+    // （poisoned），日志功能也不能跟着永久失效——否则会形成"一次意外 panic 导致
+    // 之后所有诊断日志都写不出来"的雪崩，恰恰是排查间歇性问题最怕遇到的情况。
+    let mut guard = LOG_FILE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     // Rotate check — reopen file if needed
     rotate_if_needed();
     if guard.is_none() {

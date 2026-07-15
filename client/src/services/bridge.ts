@@ -43,16 +43,62 @@ function logOverlayIpcError(op: string, err: unknown) {
   }
 }
 
+export interface OverlayHealthSnapshot {
+  showId: number
+  activeShowId: number
+  activeGeneration: number
+  acked: boolean
+  ackGeneration: number
+  ackLatencyMs: number
+  recoveryStarted: boolean
+  recoverySucceeded: boolean
+  window: {
+    handleExists: boolean
+    visible?: boolean | null
+    intersectsPrimary?: boolean
+    position?: { x: number; y: number } | null
+    size?: { width: number; height: number } | null
+  }
+}
+
+/** 原子地更新状态并显示悬浮窗，返回本次显示的关联 id。 */
+export function presentOverlay(data: unknown) {
+  return invoke<number>('present_overlay', { data }).catch((err) => {
+    logOverlayIpcError('present_overlay', err)
+    return 0
+  })
+}
+
+/** 兼容旧调用；新显示流程应优先使用 presentOverlay。 */
 export function showOverlay() {
-  invoke('show_overlay').catch((err) => logOverlayIpcError('show_overlay', err))
+  return invoke<number>('show_overlay').catch((err) => {
+    logOverlayIpcError('show_overlay', err)
+    return 0
+  })
 }
 
 export function hideOverlay() {
-  invoke('hide_overlay').catch((err) => logOverlayIpcError('hide_overlay', err))
+  return invoke<void>('hide_overlay').catch((err) => {
+    logOverlayIpcError('hide_overlay', err)
+  })
 }
 
 export function updateOverlay(data: unknown) {
-  invoke('update_overlay_state', { data }).catch((err) => logOverlayIpcError('update_overlay_state', err))
+  return invoke<void>('update_overlay_state', { data }).catch((err) => {
+    logOverlayIpcError('update_overlay_state', err)
+  })
+}
+
+export function overlayReady() {
+  return invoke<void>('overlay_ready')
+}
+
+export function overlayRenderAck(data: unknown) {
+  return invoke<void>('overlay_render_ack', { data })
+}
+
+export function getOverlayHealth(showId: number) {
+  return invoke<OverlayHealthSnapshot>('get_overlay_health', { showId })
 }
 
 // ─── Paste / Context ───

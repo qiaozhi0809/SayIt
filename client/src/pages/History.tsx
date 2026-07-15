@@ -22,8 +22,7 @@ import {
   type HistoryRecord,
 } from '@/services/store'
 import { loadAudioAsDataUrl } from '@/services/audioFileService'
-import { segmentAsrText } from '@/services/textSegmenter'
-import { applyTextReplacements } from '@/services/textReplacement'
+import { applyTextTransforms } from '@/services/textPostProcess'
 import {
   BUILTIN_SET_WORDS_KEY,
   BUILTIN_SET_ACTIVE_KEY,
@@ -427,10 +426,10 @@ export default function History() {
     }
 
     // 极速模式下 llmText === asrText（后端未经 LLM 处理时直接复制 asrText）
-    // 此时对 asrText 做智能分段提升可读性
+    // 此时文本可参与智能分段（是否分段由用户开关决定，见 applyTextTransforms）
     const needsSegment = !result.llmText || result.llmText === result.asrText
-    const finalLlm = needsSegment ? segmentAsrText(result.asrText) : result.llmText
-    const replacedLlm = await applyTextReplacements(finalLlm)
+    const baseText = needsSegment ? result.asrText : result.llmText
+    const replacedLlm = await applyTextTransforms(baseText, { segmentable: needsSegment })
 
     const meta = await buildReprocessMetadata(workMode, result)
 

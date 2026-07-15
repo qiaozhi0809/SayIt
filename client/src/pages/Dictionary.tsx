@@ -9,6 +9,7 @@ import { exportHotwords } from '@/services/exports'
 import { BUILTIN_SETS, MAX_HOTWORDS } from '@/services/hotwords/model'
 import { useHotwordsManager } from '@/services/hotwords/useHotwordsManager'
 import TextReplacementSection from '@/components/TextReplacementSection'
+import TextFormatSection from '@/components/TextFormatSection'
 
 type Tab = 'hotwords' | 'replacement'
 
@@ -71,7 +72,7 @@ export default function Dictionary() {
                 'rounded-md px-3 py-1 text-xs transition-colors',
                 tab === 'replacement' ? 'bg-accent font-medium text-foreground' : 'text-muted-foreground hover:text-foreground',
               )}
-            >文本替换</button>
+            >文本处理</button>
           </div>
         </div>
 
@@ -109,8 +110,13 @@ export default function Dictionary() {
         <p className="mb-2 text-sm text-muted-foreground">{exportMessage}</p>
       )}
 
-      {/* ===== 文本替换 Tab ===== */}
-      {tab === 'replacement' && <TextReplacementSection />}
+      {/* ===== 文本处理 Tab ===== */}
+      {tab === 'replacement' && (
+        <>
+          <TextFormatSection />
+          <TextReplacementSection />
+        </>
+      )}
 
       {/* ===== 热词 Tab ===== */}
       {tab === 'hotwords' && (

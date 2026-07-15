@@ -4,10 +4,36 @@
 //! Runs the message loop on a dedicated thread.
 
 use serde::Serialize;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use tauri::{AppHandle, Emitter};
+
+// ── 健康监测埋点（悬浮窗/热键间歇性失效排查）──
+// 这些是进程级静态量，与具体某次 hook 实例无关，用于在钩子"悄悄失效"时留下痕迹：
+// - LAST_CALLBACK_MS：钩子回调最近一次被 Windows 调用的时间（任意按键都会更新，
+//   不限于 PTT 键）。如果这个值长时间不再更新但用户在正常打字，说明钩子已被
+//   系统摘除（WH_KEYBOARD_LL 回调超时/异常会被静默移除，是本次排查的头号嫌疑）。
+// - DISPATCHER_ALIVE：dispatcher 线程是否仍在运行；线程 panic 或 recv() 返回
+//   Err（发送端全部丢弃）都会导致这个循环退出。
+// - TRY_SEND_FAIL_COUNT：钩子回调向 dispatcher 发送消息失败的累计次数——一旦
+//   >0 就说明 dispatcher 侧出了问题（队列满或已退出），即使 hook 本身还活着，
+//   PTT 事件也发不出去，前端永远等不到 ptt-down。
+static LAST_CALLBACK_MS: AtomicI64 = AtomicI64::new(0);
+static DISPATCHER_ALIVE: AtomicBool = AtomicBool::new(false);
+static TRY_SEND_FAIL_COUNT: AtomicU64 = AtomicU64::new(0);
+/// 钩子回调实际执行耗时的最大观测值（微秒），用于确认是否接近/超过 Windows 的
+/// ~200ms 静默摘除阈值。正常情况应恒定在几十微秒级别。
+static MAX_CALLBACK_DURATION_US: AtomicU64 = AtomicU64::new(0);
+/// 镜像 `KeyboardHookManager.running`——独立看门狗线程没有该实例的引用，
+/// 用全局静态量同步一份供健康快照读取。
+static HOOK_RUNNING: AtomicBool = AtomicBool::new(false);
+/// reconfigure() 累计调用次数，用于确认"过一段时间失效"是否与设置变更相关。
+static RECONFIGURE_COUNT: AtomicU64 = AtomicU64::new(0);
+
+fn now_ms() -> i64 {
+    chrono::Utc::now().timestamp_millis()
+}
 
 #[cfg(windows)]
 use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
@@ -114,6 +140,70 @@ enum HookAction {
     Diag { vk: u32, msg_name: &'static str, flags: u32, scan_code: u32 },
 }
 
+/// RAII 计时器：测量 `low_level_keyboard_proc` 单次调用耗时，drop 时更新
+/// `MAX_CALLBACK_DURATION_US`。用 Drop 而非在每个 return 点手写更新，这样
+/// 无论函数从哪条路径返回都会被覆盖到，不会漏记。
+#[cfg(windows)]
+struct CallbackTimer(std::time::Instant);
+
+#[cfg(windows)]
+impl Drop for CallbackTimer {
+    fn drop(&mut self) {
+        let elapsed_us = self.0.elapsed().as_micros() as u64;
+        let prev = MAX_CALLBACK_DURATION_US.load(Ordering::Relaxed);
+        if elapsed_us > prev {
+            MAX_CALLBACK_DURATION_US.store(elapsed_us, Ordering::Relaxed);
+        }
+    }
+}
+
+/// RAII 标记：dispatcher 线程存活状态。构造时置 true，drop 时（无论正常退出
+/// 还是 panic 展开）置 false —— 这样即使 dispatcher 线程 panic，全局健康快照
+/// 也能立刻反映出"dispatcher 已死"，不依赖它自己走到正常退出的日志行。
+struct DispatcherAliveGuard;
+
+impl DispatcherAliveGuard {
+    fn new() -> Self {
+        DISPATCHER_ALIVE.store(true, Ordering::SeqCst);
+        Self
+    }
+}
+
+impl Drop for DispatcherAliveGuard {
+    fn drop(&mut self) {
+        DISPATCHER_ALIVE.store(false, Ordering::SeqCst);
+    }
+}
+
+/// 供看门狗线程读取的健康快照，写入 sayit.log 供事后排查。
+/// 复现问题后搜索 `[ptt-watchdog]` 即可看到当时的钩子/dispatcher 状态。
+pub fn write_health_snapshot() {
+    let last_cb = LAST_CALLBACK_MS.load(Ordering::SeqCst);
+    let last_cb_age_ms = if last_cb == 0 { -1 } else { now_ms() - last_cb };
+    let dispatcher_alive = DISPATCHER_ALIVE.load(Ordering::SeqCst);
+    let hook_running = HOOK_RUNNING.load(Ordering::SeqCst);
+    let fail_count = TRY_SEND_FAIL_COUNT.load(Ordering::SeqCst);
+    let max_dur_us = MAX_CALLBACK_DURATION_US.load(Ordering::SeqCst);
+    crate::commands::system::write_log_line(&format!(
+        "[ptt-watchdog] hook_running={} dispatcher_alive={} last_callback_age_ms={} \
+         try_send_fail_count={} max_callback_duration_us={}",
+        hook_running, dispatcher_alive, last_cb_age_ms, fail_count, max_dur_us,
+    ));
+}
+
+/// 启动一个每 60 秒记录一次健康快照的看门狗线程。整个进程生命周期内只需启动一次
+/// （在 main.rs 的 setup 阶段调用），与具体某次 hook 的 start/stop/reconfigure 无关。
+pub fn spawn_health_watchdog() {
+    let _ = thread::Builder::new()
+        .name("ptt-watchdog".to_string())
+        .spawn(|| {
+            loop {
+                thread::sleep(std::time::Duration::from_secs(60));
+                write_health_snapshot();
+            }
+        });
+}
+
 // Thread-local storage for the hook callback
 thread_local! {
     static HOOK_STATE: std::cell::RefCell<Option<Arc<HookSharedState>>> = std::cell::RefCell::new(None);
@@ -138,6 +228,10 @@ impl KeyboardHookManager {
 
     /// Start the keyboard hook with the given PTT setting and optional hands-free setting
     pub fn start(&self, app: &AppHandle, ptt_setting: &str, hf_setting: &str) {
+        crate::commands::system::write_log_line(&format!(
+            "[ptt-lifecycle] start() called ptt_setting={} hf_setting={}",
+            ptt_setting, hf_setting,
+        ));
         if self.running.load(Ordering::SeqCst) {
             self.stop();
         }
@@ -173,16 +267,26 @@ impl KeyboardHookManager {
         // Wait for the thread to report its ID
         if let Ok(thread_id) = rx.recv_timeout(std::time::Duration::from_secs(5)) {
             *self.hook_thread_id.lock().unwrap() = Some(thread_id);
+            HOOK_RUNNING.store(true, Ordering::SeqCst);
             log::info!("Keyboard hook started, thread_id={}", thread_id);
+            crate::commands::system::write_log_line(&format!(
+                "[ptt-lifecycle] hook started OK thread_id={}", thread_id,
+            ));
         } else {
             log::error!("Keyboard hook thread failed to start");
+            crate::commands::system::write_log_line(
+                "[ptt-lifecycle] hook FAILED to start (rx.recv_timeout expired after 5s)"
+            );
             self.running.store(false, Ordering::SeqCst);
+            HOOK_RUNNING.store(false, Ordering::SeqCst);
         }
     }
 
     /// Stop the keyboard hook
     pub fn stop(&self) {
+        crate::commands::system::write_log_line("[ptt-lifecycle] stop() called");
         self.running.store(false, Ordering::SeqCst);
+        HOOK_RUNNING.store(false, Ordering::SeqCst);
 
         // 清理可能卡住的修饰键状态
         #[cfg(windows)]
@@ -221,6 +325,11 @@ impl KeyboardHookManager {
 
     /// Reconfigure with new PTT and hands-free settings
     pub fn reconfigure(&self, app: &AppHandle, ptt_setting: &str, hf_setting: &str) {
+        let count = RECONFIGURE_COUNT.fetch_add(1, Ordering::SeqCst) + 1;
+        crate::commands::system::write_log_line(&format!(
+            "[ptt-lifecycle] reconfigure() #{} ptt_setting={} hf_setting={} — 100ms 空档期开始",
+            count, ptt_setting, hf_setting,
+        ));
         self.stop();
         // Small delay to let the old hook thread exit
         thread::sleep(std::time::Duration::from_millis(100));
@@ -253,7 +362,13 @@ impl KeyboardHookManager {
 
         // Spawn dispatcher thread — handles logging and emit (potentially blocking ops)
         let dispatch_state = state.clone();
-        thread::spawn(move || {
+        thread::Builder::new()
+            .name("ptt-dispatcher".to_string())
+            .spawn(move || {
+            // Guard 存活期 = 本线程存活期；线程正常退出或 panic 展开都会触发 Drop，
+            // 从而让看门狗快照立刻看到 dispatcher_alive=false。
+            let _alive_guard = DispatcherAliveGuard::new();
+            crate::commands::system::write_log_line("[ptt-dispatcher] thread started");
             while let Ok(action) = action_rx.recv() {
                 match action {
                     HookAction::Diag { vk, msg_name, flags, scan_code } => {
@@ -349,7 +464,11 @@ impl KeyboardHookManager {
                 }
             }
             log::info!("[ptt] dispatcher thread exited");
-        });
+            crate::commands::system::write_log_line(
+                "[ptt-dispatcher] thread exited normally (recv() returned Err — all senders dropped)"
+            );
+            // _alive_guard drops here, flips DISPATCHER_ALIVE back to false.
+        }).expect("failed to spawn ptt-dispatcher thread");
 
         // Set thread-local state for the callback
         HOOK_STATE.with(|s| {
@@ -418,6 +537,14 @@ unsafe extern "system" fn low_level_keyboard_proc(
     w_param: WPARAM,
     l_param: LPARAM,
 ) -> LRESULT {
+    // 计时器：无论下面走哪条 return 路径，drop 时都会把本次调用耗时汇报进
+    // MAX_CALLBACK_DURATION_US，用来确认回调是否在正常情况下也逼近了 Windows
+    // 静默摘除钩子的 ~200ms 阈值。
+    let _timer = CallbackTimer(std::time::Instant::now());
+    // 任意按键（不限于 PTT 键）都刷新这个时间戳——只要这个值还在正常前进，
+    // 就说明 Windows 仍在调用本回调，钩子没有被系统摘除。
+    LAST_CALLBACK_MS.store(now_ms(), Ordering::Relaxed);
+
     if n_code >= 0 {
         let kb = &*(l_param.0 as *const KBDLLHOOKSTRUCT);
         let vk = kb.vkCode;
@@ -446,15 +573,6 @@ unsafe extern "system" fn low_level_keyboard_proc(
         // will silently remove the hook. NO blocking operations allowed.
         // All logging and emit are offloaded via try_send to a dispatcher thread.
 
-        // Ultra-low-level diagnostic: OutputDebugString bypasses all locks
-        if vk == 165 || vk == 163 {
-            extern "system" {
-                fn OutputDebugStringA(lp: *const u8);
-            }
-            let s = format!("[SayIt-hook] vk={} msg=0x{:04X}\0", vk, msg);
-            OutputDebugStringA(s.as_ptr());
-        }
-
         let mut consumed = false;
 
         HOOK_STATE.with(|s| {
@@ -470,9 +588,11 @@ unsafe extern "system" fn low_level_keyboard_proc(
                 if (is_ptt_key || is_hf_key) && (msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN) {
                     HOOK_ACTION_TX.with(|tx| {
                         if let Some(sender) = tx.borrow().as_ref() {
-                            let _ = sender.try_send(HookAction::Diag {
+                            if sender.try_send(HookAction::Diag {
                                 vk, msg_name: "hotkey-down", flags: kb_flags, scan_code: kb_scan_code,
-                            });
+                            }).is_err() {
+                                TRY_SEND_FAIL_COUNT.fetch_add(1, Ordering::Relaxed);
+                            }
                         }
                     });
                 }
@@ -496,7 +616,14 @@ unsafe extern "system" fn low_level_keyboard_proc(
                         // Non-blocking send to dispatcher
                         HOOK_ACTION_TX.with(|tx| {
                             if let Some(sender) = tx.borrow().as_ref() {
-                                let _ = sender.try_send(HookAction::PttDown { vk, gen });
+                                if sender.try_send(HookAction::PttDown { vk, gen }).is_err() {
+                                    // 这是最关键的失败点：说明 Windows 已经正确捕获了 PTT
+                                    // 按键（钩子本身还活着），但 dispatcher 收不到消息——
+                                    // 大概率是 dispatcher 线程已经 panic/退出，导致
+                                    // ptt-down 事件永远不会 emit 给前端，悬浮窗自然不会
+                                    // 出现。此时 TRY_SEND_FAIL_COUNT 会 > 0。
+                                    TRY_SEND_FAIL_COUNT.fetch_add(1, Ordering::Relaxed);
+                                }
                             }
                         });
                     }
@@ -507,7 +634,9 @@ unsafe extern "system" fn low_level_keyboard_proc(
                         if !state.hands_free_active.load(Ordering::SeqCst) {
                             HOOK_ACTION_TX.with(|tx| {
                                 if let Some(sender) = tx.borrow().as_ref() {
-                                    let _ = sender.try_send(HookAction::PttUp { vk });
+                                    if sender.try_send(HookAction::PttUp { vk }).is_err() {
+                                        TRY_SEND_FAIL_COUNT.fetch_add(1, Ordering::Relaxed);
+                                    }
                                 }
                             });
                         }
@@ -533,7 +662,9 @@ unsafe extern "system" fn low_level_keyboard_proc(
                         if had_down {
                             HOOK_ACTION_TX.with(|tx| {
                                 if let Some(sender) = tx.borrow().as_ref() {
-                                    let _ = sender.try_send(HookAction::HfToggle { vk });
+                                    if sender.try_send(HookAction::HfToggle { vk }).is_err() {
+                                        TRY_SEND_FAIL_COUNT.fetch_add(1, Ordering::Relaxed);
+                                    }
                                 }
                             });
                         }

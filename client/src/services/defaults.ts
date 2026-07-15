@@ -64,6 +64,14 @@ export const DEFAULTS: Record<string, unknown> = {
   audioRetentionDays: -1, // 录音保留天数。可选: 7 | 30 | 90 | -1（永久）
   logRetentionDays: 30, // 日志保留天数。可选: 7 | 15 | 30 | 90
 
+  // ── 文本后处理（不依赖 AI 的客户端文本规范化）──
+  textPostProcess: {
+    autoSegment: true, // 智能分段（仅极速模式生效），默认开启
+    normalizeNumbers: false, // 数字规范化：百分之/小数/分之/结构化整数
+    stripTrailingPunctuation: false, // 去除句末标点
+    punctuationToSpace: false, // 标点符号替换为空格
+  },
+
   // ── 热词 ──
   hotwordLearning: null,
 

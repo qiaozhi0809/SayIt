@@ -18,6 +18,9 @@ interface OverlayPayload {
   errorMessage?: string
   warning?: string
   toastText?: string
+  _overlayShowId?: number
+  _overlayGeneration?: number
+  _overlayProbe?: boolean
 }
 
 const DEFAULT_BAR_COUNT = 24
@@ -74,6 +77,7 @@ export default function Overlay() {
   const [copied, setCopied] = useState(false)
   const [thinkingDuration, setThinkingDuration] = useState(0)
   const [warning, setWarning] = useState('')
+  const rootRef = useRef<HTMLDivElement | null>(null)
   const hideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const elapsedSecRef = useRef(0)
 
@@ -90,7 +94,10 @@ export default function Overlay() {
   }
 
   useEffect(() => {
-    bridge.onOverlayState((data: unknown) => {
+    let disposed = false
+    let removeOverlayListener: (() => void) | null = null
+
+    const handleOverlayState = (data: unknown) => {
       const payload = data as OverlayPayload
       const nextElapsedSec = typeof payload.elapsedSec === 'number'
         ? payload.elapsedSec
@@ -106,49 +113,81 @@ export default function Overlay() {
           clearTimeout(hideTimerRef.current)
           hideTimerRef.current = null
         }
-        // 进入 thinking 状态时计算预估时长
         if (payload.state === 'thinking') {
-          const duration = calculateThinkingDuration(nextElapsedSec)
-          setThinkingDuration(duration)
+          setThinkingDuration(calculateThinkingDuration(nextElapsedSec))
         }
       }
 
-      if (Array.isArray(payload.bars) && payload.bars.length > 0) {
-        setBars(payload.bars)
-      }
+      if (Array.isArray(payload.bars) && payload.bars.length > 0) setBars(payload.bars)
       if (typeof payload.elapsedSec === 'number') {
         elapsedSecRef.current = payload.elapsedSec
         setElapsedSec(payload.elapsedSec)
       }
-      if (typeof payload.showDuration === 'boolean') {
-        setShowDuration(payload.showDuration)
-      }
-      if (payload.theme) {
-        setTheme(normalizeTheme(payload.theme))
-      }
-      if (typeof payload.barCount === 'number' && payload.barCount > 0) {
-        setBarCount(payload.barCount)
-      }
-      if (typeof payload.fallbackText === 'string') {
-        setFallbackText(payload.fallbackText)
-      }
-      if (typeof payload.errorMessage === 'string') {
-        setErrorMessage(payload.errorMessage)
-      }
-      if (typeof payload.toastText === 'string') {
-        setToastText(payload.toastText)
-      }
-      if (typeof payload.warning === 'string') {
-        setWarning(payload.warning)
-      }
+      if (typeof payload.showDuration === 'boolean') setShowDuration(payload.showDuration)
+      if (payload.theme) setTheme(normalizeTheme(payload.theme))
+      if (typeof payload.barCount === 'number' && payload.barCount > 0) setBarCount(payload.barCount)
+      if (typeof payload.fallbackText === 'string') setFallbackText(payload.fallbackText)
+      if (typeof payload.errorMessage === 'string') setErrorMessage(payload.errorMessage)
+      if (typeof payload.toastText === 'string') setToastText(payload.toastText)
+      if (typeof payload.warning === 'string') setWarning(payload.warning)
       if (payload.state === 'waiting') {
         setElapsedSec(0)
         setWarning('')
         setBars((prev) => Array(prev.length).fill(3))
       }
-    })
+
+      if (!payload._overlayProbe) return
+      const showId = payload._overlayShowId
+      const generation = payload._overlayGeneration
+      if (typeof showId !== 'number' || typeof generation !== 'number') return
+
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          if (disposed) return
+          const root = rootRef.current
+          const content = root?.querySelector<HTMLElement>('[data-overlay-content]') ?? null
+          const rootRect = root?.getBoundingClientRect()
+          const contentRect = content?.getBoundingClientRect()
+          const style = content ? window.getComputedStyle(content) : null
+          const healthy = Boolean(
+            rootRect && contentRect
+            && rootRect.width > 0 && rootRect.height > 0
+            && contentRect.width > 0 && contentRect.height > 0
+            && style?.display !== 'none'
+            && style?.visibility !== 'hidden'
+            && Number(style?.opacity ?? '1') > 0
+          )
+          void bridge.overlayRenderAck({
+            showId,
+            generation,
+            healthy,
+            overlayState: payload.state ?? 'unknown',
+            documentVisibility: document.visibilityState,
+            rootWidth: rootRect?.width ?? 0,
+            rootHeight: rootRect?.height ?? 0,
+            contentWidth: contentRect?.width ?? 0,
+            contentHeight: contentRect?.height ?? 0,
+            display: style?.display ?? 'missing',
+            visibility: style?.visibility ?? 'missing',
+            opacity: style?.opacity ?? 'missing',
+          }).catch(() => {})
+        })
+      })
+    }
+
+    void bridge.listen<unknown>('overlay-state', (event) => handleOverlayState(event.payload))
+      .then((unlisten) => {
+        if (disposed) {
+          unlisten()
+          return
+        }
+        removeOverlayListener = unlisten
+        void bridge.overlayReady().catch(() => {})
+      })
 
     return () => {
+      disposed = true
+      removeOverlayListener?.()
       if (hideTimerRef.current) {
         clearTimeout(hideTimerRef.current)
         hideTimerRef.current = null
@@ -174,16 +213,20 @@ export default function Overlay() {
       hideTimerRef.current = setTimeout(() => {
         bridge.hideOverlay()
         hideTimerRef.current = null
-      }, 1400)
+      }, 500)
     } catch (error) {
       addRuntimeEvent('error', 'overlay', '兜底卡片复制失败', { error: String(error) })
     }
   }
 
   return (
-    <div className="pointer-events-none flex h-full items-end justify-center pb-4">
+    <div
+      ref={rootRef}
+      className="pointer-events-none flex h-full items-end justify-center pb-4"
+    >
       {state === 'fallback' ? (
         <div
+          data-overlay-content
           className="pointer-events-auto flex w-full max-w-[520px] flex-col rounded-xl border px-4 py-4"
           style={{
             background: 'var(--overlay-bg)',
@@ -219,6 +262,7 @@ export default function Overlay() {
         </div>
       ) : (
         <div
+          data-overlay-content
           className="flex items-center rounded-full border px-4 py-2"
           style={{
             background: 'var(--overlay-bg)',

@@ -11,9 +11,13 @@ use tauri::{AppHandle, Emitter};
 #[cfg(windows)]
 use windows::Win32::Foundation::HWND;
 #[cfg(windows)]
+use windows::Win32::Graphics::Gdi::{
+    GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+};
+#[cfg(windows)]
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetForegroundWindow, GetWindowThreadProcessId, GetClassNameW, GetWindowTextW,
-    GetGUIThreadInfo, GUITHREADINFO,
+    GetClassNameW, GetForegroundWindow, GetGUIThreadInfo, GetWindowTextW,
+    GetWindowThreadProcessId, GUITHREADINFO,
 };
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -49,6 +53,16 @@ pub struct AppContext {
     pub is_enabled: bool,
     #[serde(rename = "isReadOnly")]
     pub is_read_only: Option<bool>,
+}
+
+/// 前台窗口所在显示器的物理工作区，已排除任务栏。
+#[derive(Debug, Clone)]
+pub struct MonitorBounds {
+    pub left: i32,
+    pub top: i32,
+    pub right: i32,
+    pub bottom: i32,
+    pub source: String,
 }
 
 pub struct ContextDetector {
@@ -221,6 +235,39 @@ pub fn capture_context(reason: &str) -> AppContext {
     ctx
 }
 
+/// 捕获当前前台窗口所在显示器的物理工作区。
+#[cfg(windows)]
+pub fn capture_foreground_monitor() -> Option<MonitorBounds> {
+    unsafe {
+        let foreground = GetForegroundWindow();
+        if foreground.0 == std::ptr::null_mut() {
+            return None;
+        }
+
+        let monitor = MonitorFromWindow(foreground, MONITOR_DEFAULTTONEAREST);
+        let mut info = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        if !GetMonitorInfoW(monitor, &mut info).as_bool() {
+            return None;
+        }
+
+        let work = info.rcWork;
+        if work.right <= work.left || work.bottom <= work.top {
+            return None;
+        }
+
+        Some(MonitorBounds {
+            left: work.left,
+            top: work.top,
+            right: work.right,
+            bottom: work.bottom,
+            source: "foreground_window".to_string(),
+        })
+    }
+}
+
 /// Use Windows UI Automation to query the focused element's properties.
 /// Populates control_type, automation_id, is_value_pattern_available,
 /// is_keyboard_focusable, is_enabled, is_read_only in AppContext.
@@ -366,6 +413,11 @@ pub fn capture_context(reason: &str) -> AppContext {
         timestamp: chrono::Utc::now().timestamp_millis(),
         ..Default::default()
     }
+}
+
+#[cfg(not(windows))]
+pub fn capture_foreground_monitor() -> Option<MonitorBounds> {
+    None
 }
 
 // ─── Win32 helpers ───

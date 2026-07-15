@@ -17,6 +17,7 @@ use context::ContextDetector;
 use tauri::{Manager, Emitter};
 use tauri::tray::{TrayIconBuilder, MouseButton, MouseButtonState, TrayIconEvent};
 use tauri::menu::{MenuBuilder, MenuItemBuilder};
+use std::thread;
 
 /// Clean up expired audio files based on retention setting.
 fn cleanup_expired_audio(storage: &Storage) {
@@ -122,6 +123,37 @@ fn main() {
         .format_timestamp_millis()
         .init();
 
+    // ── 全局 panic 钩子（悬浮窗/热键间歇性失效排查埋点）──
+    // 生产环境用 windows_subsystem="windows"，没有控制台窗口，任何线程 panic 的
+    // 默认输出（stderr）都会直接丢失、无迹可寻。键盘钩子回调、dispatcher 线程等
+    // 一旦 panic，对应线程直接退出但主进程不受影响——表现出来就是"Alt 键突然
+    // 没反应了，但软件看起来还在正常运行"，与用户反馈的现象高度吻合。
+    // 这里把所有 panic 信息（发生位置、线程名、payload）写入 sayit.log，
+    // 下次复现后可以直接搜索 "[PANIC]" 定位是哪个线程挂了。
+    {
+        let default_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |panic_info| {
+            let thread = thread::current();
+            let thread_name = thread.name().unwrap_or("<unnamed>");
+            let location = panic_info.location()
+                .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+                .unwrap_or_else(|| "<unknown>".to_string());
+            let payload = panic_info.payload();
+            let msg = if let Some(s) = payload.downcast_ref::<&str>() {
+                s.to_string()
+            } else if let Some(s) = payload.downcast_ref::<String>() {
+                s.clone()
+            } else {
+                "<non-string panic payload>".to_string()
+            };
+            commands::system::write_log_line(&format!(
+                "[PANIC] thread={} at={} msg={}",
+                thread_name, location, msg,
+            ));
+            default_hook(panic_info);
+        }));
+    }
+
     log::info!("SayIt starting, version={}", env!("CARGO_PKG_VERSION"));
     log::info!("Log file: {:?}", dirs::data_local_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
@@ -195,6 +227,11 @@ fn main() {
         .setup(move |app| {
             let hook: tauri::State<KeyboardHookManager> = app.state();
             hook.start(app.handle(), &ptt_str, &hf_str);
+
+            // 每 60s 记录一次键盘钩子健康快照（[ptt-watchdog] 日志行），
+            // 用于排查"过一段时间后 Alt 说话没反应"这类间歇性问题：
+            // 复现后翻 sayit.log 找最后一次正常快照和第一次异常快照之间的时间窗。
+            keyboard::spawn_health_watchdog();
 
             // 设置窗口图标（用 ICO 文件，包含多尺寸帧，Windows 自动选最合适的）
             // 并根据启动方式决定是否显示主窗口：
@@ -331,9 +368,13 @@ fn main() {
             commands::storage::history_delete,
             commands::storage::history_set_favorite,
             // Window
+            commands::window::present_overlay,
             commands::window::show_overlay,
             commands::window::hide_overlay,
             commands::window::update_overlay_state,
+            commands::window::overlay_ready,
+            commands::window::overlay_render_ack,
+            commands::window::get_overlay_health,
             commands::window::overlay_pong,
             // Paste / Context
             commands::paste::paste_text,

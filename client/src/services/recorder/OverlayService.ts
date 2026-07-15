@@ -1,7 +1,12 @@
 import * as bridge from '../bridge'
 import { getSetting } from '../store'
 import { clampSec } from '../timeModel'
-import { OVERLAY_WIDTH_PRESETS, type OverlayCommonPayload, type OverlayWaveTheme, type OverlayWidthPreset } from './types'
+import {
+  OVERLAY_WIDTH_PRESETS,
+  type OverlayCommonPayload,
+  type OverlayWaveTheme,
+  type OverlayWidthPreset,
+} from './types'
 
 function normalizeTheme(value: unknown): OverlayWaveTheme {
   if (value === 'black-white' || value === 'black-blue' || value === 'black-rainbow') {
@@ -85,8 +90,8 @@ export class OverlayService {
   }
 
   showWaiting() {
-    bridge.showOverlay()
-    bridge.updateOverlay({
+    this.clearFallbackHideTimer()
+    void bridge.presentOverlay({
       state: 'waiting',
       elapsedSec: 0,
       ...this.getCommonPayload(),
@@ -97,7 +102,7 @@ export class OverlayService {
     this.stopListeningTicker()
     this.playReadySound()
     this.tickerId = setInterval(() => {
-      bridge.updateOverlay({
+      void bridge.updateOverlay({
         state: 'listening',
         elapsedSec: clampSec(this.getElapsedSec()),
         ...(this.activeWarning ? { warning: this.activeWarning } : {}),
@@ -117,7 +122,7 @@ export class OverlayService {
     const now = Date.now()
     if (!force && now - this.lastFrameAt < 33) return
     this.lastFrameAt = now
-    bridge.updateOverlay({
+    void bridge.updateOverlay({
       state: 'listening',
       bars,
       elapsedSec: clampSec(this.getElapsedSec()),
@@ -127,7 +132,7 @@ export class OverlayService {
   }
 
   showThinking(elapsedSec: number) {
-    bridge.updateOverlay({
+    void bridge.updateOverlay({
       state: 'thinking',
       elapsedSec: clampSec(elapsedSec),
       ...this.getCommonPayload(),
@@ -137,7 +142,7 @@ export class OverlayService {
   /** Show a warning toast on the overlay (e.g. "单次记录最长300s") — persists until recording ends */
   showTimeoutWarning() {
     this.activeWarning = '单次记录最长300s'
-    bridge.updateOverlay({
+    void bridge.updateOverlay({
       state: 'listening',
       warning: this.activeWarning,
       elapsedSec: clampSec(this.getElapsedSec()),
@@ -147,9 +152,8 @@ export class OverlayService {
 
   /** Show low volume warning on the overlay */
   showLowVolumeWarning() {
-    // Don't override timeout warning
     if (this.activeWarning) return
-    bridge.updateOverlay({
+    void bridge.updateOverlay({
       state: 'listening',
       warning: '音量过低，请靠近麦克风',
       elapsedSec: clampSec(this.getElapsedSec()),
@@ -160,7 +164,7 @@ export class OverlayService {
   /** Clear transient warnings (low volume etc.) — does NOT clear timeout warning */
   clearWarning() {
     if (this.activeWarning) return
-    bridge.updateOverlay({
+    void bridge.updateOverlay({
       state: 'listening',
       warning: '',
       elapsedSec: clampSec(this.getElapsedSec()),
@@ -175,21 +179,18 @@ export class OverlayService {
 
   showFallback(text: string, reason: string) {
     console.log('[OverlayService] showFallback called, text:', text.slice(0, 30), 'reason:', reason)
-    // Send fallback state to overlay — overlay should already be visible from thinking state.
-    // Also send show-overlay as a safety net in case overlay was hidden.
-    bridge.updateOverlay({
+    void bridge.presentOverlay({
       state: 'fallback',
       fallbackText: text,
       fallbackReason: reason,
       ...this.getCommonPayload(),
     })
-    bridge.showOverlay()
     this.clearFallbackHideTimer()
     this.fallbackHideId = setTimeout(() => {
       console.log('[OverlayService] fallback auto-hide timer fired')
-      bridge.hideOverlay()
+      void bridge.hideOverlay()
       this.clearFallbackHideTimer()
-    }, 15000)
+    }, 10000)
   }
 
   clearFallbackHideTimer() {
@@ -200,35 +201,33 @@ export class OverlayService {
   }
 
   hide() {
-    bridge.hideOverlay()
+    void bridge.hideOverlay()
   }
 
   /** 快捷键切换润色模式后，用悬浮窗短暂提示当前模式名，约 1.6s 后自动隐藏。 */
   showPresetSwitched(name: string) {
-    bridge.updateOverlay({
+    void bridge.presentOverlay({
       state: 'toast',
       toastText: `已切换到「${name}」`,
       ...this.getCommonPayload(),
     })
-    bridge.showOverlay()
     this.clearFallbackHideTimer()
     this.fallbackHideId = setTimeout(() => {
-      bridge.hideOverlay()
+      void bridge.hideOverlay()
       this.clearFallbackHideTimer()
     }, 1600)
   }
 
   /** 显示错误信息，几秒后自动隐藏 */
   showError(message: string) {
-    bridge.updateOverlay({
+    void bridge.presentOverlay({
       state: 'error',
       errorMessage: message,
       ...this.getCommonPayload(),
     })
-    bridge.showOverlay()
     this.clearFallbackHideTimer()
     this.fallbackHideId = setTimeout(() => {
-      bridge.hideOverlay()
+      void bridge.hideOverlay()
       this.clearFallbackHideTimer()
     }, 4000)
   }
@@ -236,6 +235,6 @@ export class OverlayService {
   dispose() {
     this.stopListeningTicker()
     this.clearFallbackHideTimer()
-    bridge.hideOverlay()
+    void bridge.hideOverlay()
   }
 }

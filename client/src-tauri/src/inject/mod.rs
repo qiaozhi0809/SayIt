@@ -11,6 +11,89 @@
 use serde::Serialize;
 
 #[cfg(windows)]
+use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(windows)]
+use std::time::Instant;
+
+/// 每次剪贴板粘贴递增。旧恢复线程看到新一代粘贴后会放弃，避免覆盖新内容。
+#[cfg(windows)]
+static PASTE_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(windows)]
+struct ClipboardRestoreGuard {
+    enabled: bool,
+    previous_text: Option<String>,
+    injected_text: String,
+    paste_id: u64,
+}
+
+#[cfg(windows)]
+impl ClipboardRestoreGuard {
+    fn new(enabled: bool, previous_text: Option<String>, injected_text: &str, paste_id: u64) -> Self {
+        Self {
+            enabled,
+            previous_text,
+            injected_text: injected_text.to_owned(),
+            paste_id,
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for ClipboardRestoreGuard {
+    fn drop(&mut self) {
+        if !self.enabled {
+            return;
+        }
+
+        let previous_text = self.previous_text.take();
+        let injected_text = std::mem::take(&mut self.injected_text);
+        let paste_id = self.paste_id;
+        let scheduled_at = Instant::now();
+
+        // Drop 发生在 WM_PASTE/SendInput 已执行之后，因此 400ms 从实际粘贴触发时开始计算。
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(400));
+            let elapsed_ms = scheduled_at.elapsed().as_millis();
+            let current_generation = PASTE_GENERATION.load(Ordering::Acquire);
+            if current_generation != paste_id {
+                crate::commands::system::write_log_line(&format!(
+                    "[RUST] [inject] clipboard restore skipped pasteId={} reason=superseded currentGeneration={} elapsedMs={}",
+                    paste_id, current_generation, elapsed_ms
+                ));
+                return;
+            }
+
+            unsafe {
+                // 用户或目标程序若已改写剪贴板，不再用旧内容覆盖它。
+                let current_text = native_get_clipboard_text();
+                if current_text.as_deref() != Some(injected_text.as_str()) {
+                    crate::commands::system::write_log_line(&format!(
+                        "[RUST] [inject] clipboard restore skipped pasteId={} reason=clipboard_changed currentUtf16Len={} elapsedMs={}",
+                        paste_id,
+                        current_text.as_deref().map(|value| value.encode_utf16().count()).unwrap_or(0),
+                        elapsed_ms
+                    ));
+                    return;
+                }
+
+                let restored = match &previous_text {
+                    Some(text) => set_clipboard_with_retry(text, 3, 20),
+                    None => native_clear_clipboard(),
+                };
+                crate::commands::system::write_log_line(&format!(
+                    "[RUST] [inject] clipboard restore finished pasteId={} restored={} previousUtf16Len={} elapsedMs={}",
+                    paste_id,
+                    restored,
+                    previous_text.as_deref().map(|value| value.encode_utf16().count()).unwrap_or(0),
+                    elapsed_ms
+                ));
+            }
+        });
+    }
+}
+
+#[cfg(windows)]
 use windows::Win32::Foundation::HWND;
 #[cfg(windows)]
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -220,6 +303,8 @@ const ID_CONSOLE_PASTE: usize = 0xFFF1;
 /// 再把剪贴板还原为原内容，避免用户之前复制的东西被覆盖丢失。
 #[cfg(windows)]
 unsafe fn do_inject(target: HWND, focus: HWND, text: &str, restore_clipboard: bool) -> InjectResult {
+    let paste_id = PASTE_GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
+
     // 保存原剪贴板内容（在写入新文本之前）。剪贴板本来为空/非文本时为 None，
     // 还原时会清空剪贴板而不是留着我们刚插入的文本。
     let previous_clipboard_text = if restore_clipboard {
@@ -231,29 +316,39 @@ unsafe fn do_inject(target: HWND, focus: HWND, text: &str, restore_clipboard: bo
     // Step 1: Write text to clipboard
     let clipboard_ok = set_clipboard_with_retry(text, 5, 30);
     if !clipboard_ok {
+        crate::commands::system::write_log_line(&format!(
+            "[RUST] [inject] clipboard write failed pasteId={} utf8Len={} utf16Len={}",
+            paste_id,
+            text.len(),
+            text.encode_utf16().count()
+        ));
         return InjectResult {
             ok: false,
             strategy: Some("clipboard".to_string()),
             reason: Some("clipboard_write_failed".to_string()),
-            detail: Some("failed after 5 retries".to_string()),
+            detail: Some(format!("pasteId={} failed after 5 retries", paste_id)),
             uncertain: false,
         };
     }
 
-    // 延迟还原剪贴板：粘贴指令有的是同步的（WM_PASTE/console_paste 在返回前已处理完），
-    // 有的是异步的（SendInput 是 fire-and-forget，目标程序稍后才读取剪贴板），
-    // 统一在独立线程里等待一段安全时间再还原，不阻塞本函数的返回。
-    if restore_clipboard {
-        std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(400));
-            unsafe {
-                match &previous_clipboard_text {
-                    Some(t) => { let _ = set_clipboard_with_retry(t, 3, 20); }
-                    None => { let _ = native_clear_clipboard(); }
-                }
-            }
-        });
-    }
+    let clipboard_matches = native_get_clipboard_text().as_deref() == Some(text);
+    crate::commands::system::write_log_line(&format!(
+        "[RUST] [inject] clipboard write ok pasteId={} utf8Len={} utf16Len={} clipboardMatches={} restoreRequested={}",
+        paste_id,
+        text.len(),
+        text.encode_utf16().count(),
+        clipboard_matches,
+        restore_clipboard
+    ));
+
+    // 守卫在函数返回时才启动恢复计时，确保恢复延迟从实际粘贴触发之后开始。
+    // generation 与剪贴板内容复核可阻止旧线程覆盖后续粘贴或用户新复制的内容。
+    let _clipboard_restore_guard = ClipboardRestoreGuard::new(
+        restore_clipboard,
+        previous_clipboard_text,
+        text,
+        paste_id,
+    );
 
     // Step 1.5: 经典控制台窗口（conhost，类名 ConsoleWindowClass）——用控制台
     // 宿主自带的「粘贴」命令，而不是模拟 Ctrl+V 按键。
