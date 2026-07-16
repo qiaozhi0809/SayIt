@@ -2,7 +2,7 @@ use serde_json::{json, Map, Value};
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 
 use crate::commands::system::write_log_line;
@@ -48,6 +48,8 @@ pub struct WindowState {
     last_ack_generation: AtomicU64,
     last_ack_at_ms: AtomicI64,
     recovery_started_show_id: AtomicU64,
+    /// 进程/状态创建时间，用于日志记录运行时长（配合资源计数排查“长时间运行后悬浮窗失效”）
+    created_at: Instant,
 }
 impl WindowState {
     pub fn new() -> Self {
@@ -64,6 +66,7 @@ impl WindowState {
             last_ack_generation: AtomicU64::new(0),
             last_ack_at_ms: AtomicI64::new(0),
             recovery_started_show_id: AtomicU64::new(0),
+            created_at: Instant::now(),
         }
     }
 
@@ -83,9 +86,11 @@ impl WindowState {
         self.recovery_started_show_id.store(0, Ordering::SeqCst);
 
         let state_name = self.latest_state_name();
+        let (gdi, user_obj) = gui_resource_counts();
+        let overlay_visible = app.get_webview_window("overlay").and_then(|o| o.is_visible().ok());
         write_log_line(&format!(
-            "[overlay-health] present show_id={} state={} generation=0",
-            show_id, state_name,
+            "[overlay-health] present show_id={} state={} generation=0 uptimeSec={} gdi={} user={} overlayVisible={:?}",
+            show_id, state_name, self.created_at.elapsed().as_secs(), gdi, user_obj, overlay_visible,
         ));
 
         if self.ensure_visible(app, show_id) {
@@ -509,6 +514,25 @@ fn spawn_render_watchdog(app: AppHandle, show_id: u64) {
                 ));
             }
         });
+}
+
+/// 当前进程的 GDI / USER 句柄数。长时间运行后若这两个数持续增长，
+/// 说明有句柄泄漏——是“悬浮窗用久后不再出现、重启即好”的典型根因。
+#[cfg(windows)]
+fn gui_resource_counts() -> (u32, u32) {
+    // GetGuiResources 在不同 windows crate 版本里的模块路径不稳定，直接用 FFI 声明最稳。
+    // GR_GDIOBJECTS=0，GR_USEROBJECTS=1；当前进程用伪句柄 (HANDLE)-1。
+    #[link(name = "user32")]
+    extern "system" {
+        fn GetGuiResources(hprocess: *mut core::ffi::c_void, uiflags: u32) -> u32;
+    }
+    let cur_proc = -1isize as *mut core::ffi::c_void;
+    unsafe { (GetGuiResources(cur_proc, 0), GetGuiResources(cur_proc, 1)) }
+}
+
+#[cfg(not(windows))]
+fn gui_resource_counts() -> (u32, u32) {
+    (0, 0)
 }
 
 fn compact_json(value: &Value) -> String {

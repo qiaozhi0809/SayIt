@@ -471,13 +471,17 @@ unsafe fn do_inject(target: HWND, focus: HWND, text: &str, restore_clipboard: bo
         make_key_input(vk_ctrl, KEYEVENTF_KEYUP),
     ];
     let sent = SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
+    // 立刻抓 GetLastError（后面的 sleep/release_modifiers 会把它冲掉）。
+    // sent=0 且 err=5(ERROR_ACCESS_DENIED) => UIPI 拦截：目标窗口权限比 SayIt 高
+    // （目标以管理员运行而 SayIt 没有），解决办法是让 SayIt 以管理员身份运行。
+    let last_err = windows::Win32::Foundation::GetLastError().0;
 
     std::thread::sleep(std::time::Duration::from_millis(10));
     release_modifiers();
 
     let detail = format!(
-        "sent={} class={} target={} focus={} textLen={} fgOk={}",
-        sent, focus_class, target.0 as isize, focus.0 as isize, text.len(), fg_ok
+        "sent={} err={} class={} target={} focus={} textLen={} fgOk={}",
+        sent, last_err, focus_class, target.0 as isize, focus.0 as isize, text.len(), fg_ok
     );
 
     // SendInput Ctrl+V is fire-and-forget. For Chromium-class windows we
