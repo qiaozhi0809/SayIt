@@ -17,8 +17,8 @@ const REFRESH_MS = 3 * 60 * 60 * 1000
 
 const LEVEL_STYLES: Record<NoticeLevel, { wrap: string; accent: string; Icon: typeof Info }> = {
   info: {
-    wrap: 'border-primary/30 bg-primary/5',
-    accent: 'text-primary',
+    wrap: 'border-blue-500/40 bg-blue-500/10',
+    accent: 'text-blue-500',
     Icon: Info,
   },
   warning: {
