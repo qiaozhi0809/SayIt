@@ -2,9 +2,10 @@
 // 豆包 ASR：边录边发（实时流式）
 // 其他 ASR：录完再发（BufferedProvider）
 
-import { isQwenOmniProvider, resolveQwenOmniModel } from '@/lib/asrModels'
+import { isQwenOmniProvider, isStreamingDisplayReady, resolveQwenOmniModel } from '@/lib/asrModels'
 import { uint8ArrayToBase64 } from '@/lib/encoding'
 import { invoke } from '@tauri-apps/api/core'
+import { listen } from '@tauri-apps/api/event'
 import { getSetting } from '../store'
 import { addRuntimeEvent } from '../debugLog'
 import type {
@@ -51,6 +52,15 @@ export class CloudAPIProvider implements TranscriptionProvider {
   private pendingChunks: ArrayBuffer[] = []
   private flushTimer: ReturnType<typeof setInterval> | null = null
 
+  // 流式实时显示：本次会话是否开启，以及中间结果事件的取消监听函数
+  private streamingDisplay = false
+  private partialUnlisten: (() => void) | null = null
+
+  // 流式发送串行化：所有音频包经此链路顺序发送，保证收尾负包一定排在最后，
+  // 避免「音频包在负包之后到达」导致服务端报 last packet has been received already。
+  private sendLock: Promise<void> = Promise.resolve()
+  private streamFinishing = false
+
   async connect(callbacks: TranscriptionCallbacks): Promise<void> {
     this.callbacks = callbacks
     this.ready = true
@@ -72,11 +82,38 @@ export class CloudAPIProvider implements TranscriptionProvider {
     this.qwenStreamReady = false
     this.streamStartTime = performance.now()
     this.pendingChunks = []
+    this.streamingDisplay = Boolean(opts?.streamingDisplay)
+    this.streamFinishing = false
+    this.sendLock = Promise.resolve()
 
     // 异步判断供应商并建连
     void this.tryStartRealtimeStream()
 
     return true
+  }
+
+  /** 订阅 Rust 上抛的流式中间识别结果，实时转发给上层用于悬浮窗上屏 */
+  private async subscribePartials(): Promise<void> {
+    if (this.partialUnlisten) return
+    let partialCount = 0
+    this.partialUnlisten = await listen<{ text?: string }>('asr-partial', (event) => {
+      if (!this.sessionActive && this.pcmBuffers.length === 0) return
+      const text = event.payload?.text ?? ''
+      partialCount++
+      // 只记录第一条，避免刷屏；证明前端确实收到了 Rust 上抛的中间结果
+      if (partialCount === 1) {
+        addRuntimeEvent('info', 'cloud_api', '收到首个流式中间结果', { textLen: text.length })
+      }
+      this.callbacks.onPartialASR?.(text)
+    })
+    addRuntimeEvent('info', 'cloud_api', '已订阅 asr-partial 事件')
+  }
+
+  private teardownPartials(): void {
+    if (this.partialUnlisten) {
+      this.partialUnlisten()
+      this.partialUnlisten = null
+    }
   }
 
   sendAudio(buffer: ArrayBuffer): void {
@@ -85,8 +122,9 @@ export class CloudAPIProvider implements TranscriptionProvider {
     // 始终缓存一份（用于非豆包场景 + 音频保存）
     this.pcmBuffers.push(buffer.slice(0))
 
-    // 豆包/千问流式：攒到 pendingChunks，由定时器批量发送
-    if (this.isDoubaoStream || this.isQwenStream) {
+    // 豆包/千问流式：攒到 pendingChunks，由定时器批量发送。
+    // 收尾阶段不再接收新音频，确保负包之后不会再有音频包。
+    if ((this.isDoubaoStream || this.isQwenStream) && !this.streamFinishing) {
       this.pendingChunks.push(buffer.slice(0))
     }
   }
@@ -107,6 +145,7 @@ export class CloudAPIProvider implements TranscriptionProvider {
     this.isQwenStream = false
     this.doubaoStreamReady = false
     this.qwenStreamReady = false
+    this.teardownPartials()
     if (this.flushTimer) { clearInterval(this.flushTimer); this.flushTimer = null }
     invoke('doubao_stream_close').catch(() => {})
     invoke('qwen_stream_close').catch(() => {})
@@ -123,6 +162,17 @@ export class CloudAPIProvider implements TranscriptionProvider {
   private async tryStartRealtimeStream(): Promise<void> {
     try {
       const asrProvider = await getSetting('cloudAsr.provider', 'doubao') as string
+      const qwenWorkspaceId = await getSetting('cloudAsr.qwen.workspaceId', '') as string
+
+      // 是否为本次会话开启「流式实时显示」：直接读设置（单一真源，避免录音器缓存过期），
+      // 结合 startOpts 兜底，并要求当前供应商在当前配置下真正就绪（qwen 需 WorkspaceId）。
+      const settingOn = Boolean(await getSetting('streamingDisplayEnabled', false))
+      const realtime = (settingOn || Boolean(this.streamingDisplay)) && isStreamingDisplayReady(asrProvider, qwenWorkspaceId)
+      addRuntimeEvent('info', 'cloud_api', '流式实时显示判定', { asrProvider, settingOn, startOpt: Boolean(this.streamingDisplay), hasWorkspace: Boolean(qwenWorkspaceId), realtime })
+      if (realtime) {
+        // 先订阅中间结果，避免建连后、订阅前丢帧
+        await this.subscribePartials()
+      }
 
       if (asrProvider === 'doubao_v2') {
         // 豆包流式
@@ -130,36 +180,42 @@ export class CloudAPIProvider implements TranscriptionProvider {
         const asrApiKey = await getSetting('cloudAsr.apiKey', '') as string
         const asrAppId = await getSetting('cloudAsr.appId', '') as string
 
-        addRuntimeEvent('info', 'cloud_api', '豆包流式：建立连接')
+        addRuntimeEvent('info', 'cloud_api', '豆包流式：建立连接', { realtime })
         await invoke('doubao_stream_open', {
           config: { provider: 'doubao_v2', api_key: asrApiKey, app_id: asrAppId },
           sampleRate: 16000,
           hotwords: this.startOpts?.hotwords ?? [],
+          realtime,
         })
         this.doubaoStreamReady = true
         addRuntimeEvent('info', 'cloud_api', '豆包流式：连接就绪')
-      } else if (asrProvider === 'qwen' || asrProvider === 'qwen_realtime') {
-        // 千问流式
+      } else if (asrProvider === 'qwen_realtime' && realtime) {
+        // 千问实时（qwen3-asr-flash-realtime）：仅在开启实时显示且配置了 WorkspaceId 时才走流式 WebSocket。
+        // qwen3-asr-flash（非实时）与未配置/未开启时都不进此分支，走下面的一次性识别。
         this.isQwenStream = true
         const asrApiKey = await getSetting('cloudAsr.apiKey', '') as string
 
-        addRuntimeEvent('info', 'cloud_api', '千问流式：建立连接')
+        addRuntimeEvent('info', 'cloud_api', '千问实时：建立连接', { hasWorkspace: Boolean(qwenWorkspaceId) })
         await invoke('qwen_stream_open', {
           config: { provider: 'qwen', api_key: asrApiKey, app_id: '' },
           hotwords: this.startOpts?.hotwords ?? [],
+          realtime,
+          workspaceId: qwenWorkspaceId,
         })
         this.qwenStreamReady = true
-        addRuntimeEvent('info', 'cloud_api', '千问流式：连接就绪')
+        addRuntimeEvent('info', 'cloud_api', '千问实时：连接就绪')
       } else {
-        // 其他供应商不走流式
+        // 其他情况（含未配置 WorkspaceId 的千问）走录完再发的一次性识别
+        this.teardownPartials()
         return
       }
 
       // 补发建连期间已缓存的音频
       await this.flushPendingChunks()
 
-      // 启动定时器，每 200ms 批量发送一次
+      // 启动定时器，每 200ms 批量发送一次（收尾阶段不再触发新发送）
       this.flushTimer = setInterval(() => {
+        if (this.streamFinishing) return
         const ready = this.doubaoStreamReady || this.qwenStreamReady
         if (ready && this.pendingChunks.length > 0) {
           void this.flushPendingChunks()
@@ -171,33 +227,41 @@ export class CloudAPIProvider implements TranscriptionProvider {
       this.isQwenStream = false
       this.doubaoStreamReady = false
       this.qwenStreamReady = false
+      this.teardownPartials()
     }
   }
 
-  private async flushPendingChunks(): Promise<void> {
-    if (this.pendingChunks.length === 0) return
+  /** 把一次批量发送排入串行链路，返回可 await 的 Promise。
+   *  链式串行保证多次 flush、以及收尾前的最终 flush 都严格按顺序送达 Rust，
+   *  绝不会出现音频包穿插到负包之后。 */
+  private flushPendingChunks(): Promise<void> {
+    const run = async () => {
+      if (this.pendingChunks.length === 0) return
+      const chunks = this.pendingChunks
+      this.pendingChunks = []
 
-    const chunks = this.pendingChunks
-    this.pendingChunks = []
-
-    const totalLen = chunks.reduce((s, c) => s + c.byteLength, 0)
-    const merged = new Uint8Array(totalLen)
-    let offset = 0
-    for (const chunk of chunks) {
-      merged.set(new Uint8Array(chunk), offset)
-      offset += chunk.byteLength
-    }
-
-    const b64 = uint8ArrayToBase64(merged)
-    try {
-      if (this.isDoubaoStream) {
-        await invoke('doubao_stream_send', { pcmB64: b64 })
-      } else if (this.isQwenStream) {
-        await invoke('qwen_stream_send', { pcmB64: b64 })
+      const totalLen = chunks.reduce((s, c) => s + c.byteLength, 0)
+      const merged = new Uint8Array(totalLen)
+      let offset = 0
+      for (const chunk of chunks) {
+        merged.set(new Uint8Array(chunk), offset)
+        offset += chunk.byteLength
       }
-    } catch (err) {
-      addRuntimeEvent('warn', 'cloud_api', '流式发送失败', { error: String(err) })
+
+      const b64 = uint8ArrayToBase64(merged)
+      try {
+        if (this.isDoubaoStream) {
+          await invoke('doubao_stream_send', { pcmB64: b64 })
+        } else if (this.isQwenStream) {
+          await invoke('qwen_stream_send', { pcmB64: b64 })
+        }
+      } catch (err) {
+        addRuntimeEvent('warn', 'cloud_api', '流式发送失败', { error: String(err) })
+      }
     }
+    // 接到发送链尾部，串行执行（无论前一个成功或失败都继续）
+    this.sendLock = this.sendLock.then(run, run)
+    return this.sendLock
   }
 
   // ── 处理逻辑 ──
@@ -209,6 +273,7 @@ export class CloudAPIProvider implements TranscriptionProvider {
     try {
       const totalBytes = this.pcmBuffers.reduce((sum, buf) => sum + buf.byteLength, 0)
       if (totalBytes === 0) {
+        this.teardownPartials()
         this.callbacks.onDone?.()
         return
       }
@@ -218,6 +283,7 @@ export class CloudAPIProvider implements TranscriptionProvider {
         addRuntimeEvent('info', 'cloud_api', '音频过短，跳过处理', { durationSec })
         if (this.isDoubaoStream) invoke('doubao_stream_close').catch(() => {})
         if (this.isQwenStream) invoke('qwen_stream_close').catch(() => {})
+        this.teardownPartials()
         this.callbacks.onDone?.()
         return
       }
@@ -230,9 +296,12 @@ export class CloudAPIProvider implements TranscriptionProvider {
       let asrMs = 0
 
       if ((this.isDoubaoStream && this.doubaoStreamReady) || (this.isQwenStream && this.qwenStreamReady)) {
-        // 流式：停止定时器，flush 剩余数据，发送最后一包
+        // 流式收尾：先置收尾标志（阻止新音频入队/定时器再发），停定时器，
+        // flush 剩余数据并等发送链彻底排空，最后再发负包——保证负包是最后一个包。
+        this.streamFinishing = true
         if (this.flushTimer) { clearInterval(this.flushTimer); this.flushTimer = null }
         await this.flushPendingChunks()
+        await this.sendLock
 
         if (this.isDoubaoStream) {
           addRuntimeEvent('info', 'cloud_api', '豆包流式：发送 finish')
@@ -292,6 +361,8 @@ export class CloudAPIProvider implements TranscriptionProvider {
       }
 
       this.pcmBuffers = []
+      // ASR 已拿到最终文本，后续不再有中间结果，撤下监听
+      this.teardownPartials()
 
       // 发送 ASR 中间结果
       this.callbacks.onASR?.({ text: asrText, asrMs, durationSec })
@@ -343,6 +414,7 @@ export class CloudAPIProvider implements TranscriptionProvider {
       this.callbacks.onDone?.()
     } catch (err) {
       addRuntimeEvent('error', 'cloud_api', '处理异常', { error: String(err) })
+      this.teardownPartials()
       this.callbacks.onError?.(String(err))
       this.callbacks.onDone?.()
     }

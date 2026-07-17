@@ -6,7 +6,7 @@ import { Card, CardContent } from '@/components/ui/card'
 import { getSetting } from '@/services/store'
 import { getRuntimeEvents, type RuntimeEvent } from '@/services/debugLog'
 import { getWorkMode } from '@/services/transcription'
-import { FolderOpen, RefreshCw, CheckCircle2, XCircle, MinusCircle } from 'lucide-react'
+import { FolderOpen, RefreshCw, CheckCircle2, XCircle, MinusCircle, HelpCircle, ChevronDown } from 'lucide-react'
 import { Tooltip } from '@/components/ui/tooltip'
 import DiagnosticsReportPanel from './DiagnosticsReportPanel'
 
@@ -37,6 +37,20 @@ const AI_DISPLAY: Record<string, string> = {
   ollama: 'Ollama（本地）',
 }
 
+// 常见问题（自助排查）
+const FAQ_ITEMS: { q: string; answer: React.ReactNode }[] = [
+  {
+    q: '识别完成后，文字没有插入到输入框？',
+    answer: (
+      <ol className="list-decimal space-y-1.5 pl-5">
+        <li>确认光标在目标输入框内（先点一下输入框）。</li>
+        <li>按快捷键时别让焦点被切走，松手时光标应仍在输入框。</li>
+        <li>到处都插不进：多为安全软件拦截（如 360），把 SayIt 加入信任 / 白名单。</li>
+      </ol>
+    ),
+  },
+]
+
 function StatusIcon({ status }: { status: HealthStatus }) {
   if (status === 'ok') return <CheckCircle2 className="h-4 w-4 text-green-500" />
   if (status === 'error') return <XCircle className="h-4 w-4 text-red-500" />
@@ -64,6 +78,7 @@ export default function DiagnosticsPage() {
   const [logFilter, setLogFilter] = useState<LogFilter>('errors')
   const [logContent, setLogContent] = useState('')
   const [showFileLog, setShowFileLog] = useState(true)
+  const [openFaq, setOpenFaq] = useState<number | null>(0)
 
   useEffect(() => {
     void doHealthCheck()
@@ -227,6 +242,38 @@ export default function DiagnosticsPage() {
                   <span className="ml-auto text-sm text-muted-foreground">{item.detail}</span>
                 </div>
               ))}
+            </div>
+          </CardContent>
+        </Card>
+
+        {/* 常见问题 */}
+        <Card>
+          <CardContent className="p-6">
+            <div className="mb-4 flex items-center gap-2">
+              <HelpCircle className="h-4 w-4 text-muted-foreground" />
+              <h2 className="text-lg font-semibold">常见问题</h2>
+            </div>
+            <div className="space-y-2">
+              {FAQ_ITEMS.map((item, i) => {
+                const open = openFaq === i
+                return (
+                  <div key={i} className="overflow-hidden rounded-md border">
+                    <button
+                      type="button"
+                      onClick={() => setOpenFaq(open ? null : i)}
+                      className="flex w-full items-center gap-2 px-3 py-2.5 text-left text-sm font-medium transition-colors hover:bg-accent"
+                    >
+                      <ChevronDown className={`h-4 w-4 shrink-0 text-muted-foreground transition-transform ${open ? '' : '-rotate-90'}`} />
+                      <span className="flex-1">{item.q}</span>
+                    </button>
+                    {open && (
+                      <div className="border-t px-4 py-3 text-xs leading-relaxed text-muted-foreground">
+                        {item.answer}
+                      </div>
+                    )}
+                  </div>
+                )
+              })}
             </div>
           </CardContent>
         </Card>

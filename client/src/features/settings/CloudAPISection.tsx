@@ -121,6 +121,7 @@ export default function CloudAPISection() {
   const [asrTesting, setAsrTesting] = useState(false)
   const [asrMessage, setAsrMessage] = useState('')
   const [omniSystemPrompt, setOmniSystemPrompt] = useState(DEFAULT_OMNI_PROMPT)
+  const [qwenWorkspaceId, setQwenWorkspaceId] = useState('')
 
   // 加载指定平台的 ASR key（每个供应商分组独立，不回退到全局，避免带入其它供应商的 key）
   async function loadAsrKeys(provider: string) {
@@ -148,6 +149,12 @@ export default function CloudAPISection() {
     }
     await loadAsrKeys(provider)
     setOmniSystemPrompt(await getSetting('cloudAsr.omniSystemPrompt', DEFAULT_OMNI_PROMPT) as string)
+    setQwenWorkspaceId(await getSetting('cloudAsr.qwen.workspaceId', '') as string)
+  }
+
+  function handleQwenWorkspaceIdChange(v: string) {
+    setQwenWorkspaceId(v)
+    void setSetting('cloudAsr.qwen.workspaceId', v.trim())
   }
 
   // 切换供应商时自动保存 provider 并加载对应平台的 key，同步到全局 key
@@ -230,6 +237,8 @@ export default function CloudAPISection() {
                 ))}
               </select>
             </div>
+
+
             {/* 只有豆包需要 App ID；千问（含流式/Omni）和 MiMo 只需要 API Key */}
             {asrProvider === 'doubao_v2' && (
             <div>
@@ -279,6 +288,31 @@ export default function CloudAPISection() {
                 </p>
               )}
             </div>
+            {asrProvider === 'qwen_realtime' && (
+              <div>
+                <label className="mb-1 block text-sm text-muted-foreground">
+                  业务空间 ID（选填）
+                </label>
+                <PasswordInput
+                  value={qwenWorkspaceId}
+                  onChange={handleQwenWorkspaceIdChange}
+                  placeholder="如 ws-xxxxxxxx"
+                  className={inputClass}
+                />
+                <p className="mt-1.5 text-xs text-muted-foreground">
+                  使用「流式实时字幕」功能需填入此 ID，否则可留空。登录
+                  <button
+                    type="button"
+                    onClick={() => void shellOpen('https://bailian.console.aliyun.com')}
+                    className="mx-0.5 inline-flex items-center gap-0.5 text-primary underline underline-offset-2 decoration-primary/50 transition-colors hover:decoration-primary"
+                  >
+                    百炼控制台
+                    <ExternalLink className="h-3 w-3" />
+                  </button>
+                  后，鼠标移到右上角「默认业务空间」即可查看。
+                </p>
+              </div>
+            )}
             {asrProvider.startsWith('qwen_omni') && (
               <div>
                 <label className="mb-1.5 block text-sm text-muted-foreground">System Prompt</label>

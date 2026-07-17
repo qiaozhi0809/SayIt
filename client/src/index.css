@@ -130,6 +130,12 @@
   50% { opacity: 0.8; transform: scale(1.8); }
 }
 
+/* 流式字幕的文字光标：只改透明度、不缩放不移动，柔和的打字机竖线 */
+@keyframes caret-blink {
+  0%, 40% { opacity: 0.9; }
+  70%, 100% { opacity: 0.25; }
+}
+
 /* Overlay waiting pulse animation */
 @keyframes pulse-slide {
   0% { transform: translateX(-100%); }

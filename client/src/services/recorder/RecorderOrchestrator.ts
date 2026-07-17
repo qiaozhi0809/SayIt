@@ -1,6 +1,7 @@
 import * as bridge from '../bridge'
 import { startCapture, stopCapture } from '../audio'
 import { getProvider, type TranscriptionProvider, type TranscriptionCallbacks, type FinalResult } from '../transcription'
+import { isStreamingDisplayReady } from '@/lib/asrModels'
 import {
   addHistory,
   getActivePresetId,
@@ -124,6 +125,8 @@ export class RecorderOrchestrator {
   private cachedUserStats: UserStats = createDefaultUserStats()
   private cachedHotwords: string[] = []
   private cachedLanguage: string = ''
+  /** 是否开启流式实时显示（识别过程中把中间结果实时显示在悬浮窗）。默认关闭。 */
+  private cachedStreamingDisplay = false
   private currentActiveAppContext: ActiveAppContext | null = null
   private currentPromptResolution: PromptResolution | null = null
   /** Probe result captured at startRecording time (before audio capture begins).
@@ -361,6 +364,30 @@ export class RecorderOrchestrator {
     this.cachedActivePresetId = id
   }
 
+  /** 仅更新「流式实时显示」开关缓存，供外观设置切换后立即生效。 */
+  setStreamingDisplayCache(next: boolean) {
+    this.cachedStreamingDisplay = next
+  }
+
+  /** 录音开始时实时判定是否激活流式字幕气泡（读最新的开关/供应商/WorkspaceId，避免缓存过期）。
+   *  仅 doubao_v2 与 qwen_realtime（且 qwen 需配 WorkspaceId）才激活；qwen3-asr-flash 等不激活。 */
+  private async applyStreamingActive(): Promise<void> {
+    try {
+      const [streamOn, provider, workspaceId] = await Promise.all([
+        getSetting('streamingDisplayEnabled', false),
+        getSetting('cloudAsr.provider', 'doubao_v2'),
+        getSetting('cloudAsr.qwen.workspaceId', ''),
+      ])
+      if (this.state !== 'recording') return
+      const active = Boolean(streamOn)
+        && this.provider.mode === 'cloud_api'
+        && isStreamingDisplayReady(String(provider || ''), String(workspaceId || ''))
+      this.overlayService.setStreamingActive(active)
+    } catch {
+      /* ignore — 气泡占位是锦上添花，读取失败不影响录音 */
+    }
+  }
+
   async refreshRuntimeSettings() {
     const [
       micId,
@@ -371,6 +398,7 @@ export class RecorderOrchestrator {
       aiEnabled,
       appPromptRules,
       userStats,
+      streamingDisplay,
     ] = await Promise.all([
       getSetting('selectedMic', ''),
       getSetting('muteSystemAudioWhileRecording', false),
@@ -380,6 +408,7 @@ export class RecorderOrchestrator {
       getSetting('aiEnabled', false),
       getAppPromptRules(),
       getUserStats(),
+      getSetting('streamingDisplayEnabled', false),
     ])
 
     this.cachedMicId = String(micId || '')
@@ -390,6 +419,7 @@ export class RecorderOrchestrator {
     this.cachedAiEnabled = Boolean(aiEnabled)
     this.cachedAppPromptRules = appPromptRules
     this.cachedUserStats = userStats
+    this.cachedStreamingDisplay = Boolean(streamingDisplay)
     await this.overlayService.refreshSettings()
 
     // 热词 / 服务器语言 / 客户端运行时信息彼此独立，并行加载而非依次 await，
@@ -482,6 +512,7 @@ export class RecorderOrchestrator {
     }
     this.overlayService.stopListeningTicker()
     this.overlayService.resetWarnings()
+    this.overlayService.resetStreamingText()
     // 安全网：若仍处于我们施加的系统静音中，确保恢复
     this.restoreSystemMuteIfNeeded()
     this.startRecordingLock = false
@@ -512,6 +543,12 @@ export class RecorderOrchestrator {
 
   private buildProviderCallbacks(): TranscriptionCallbacks {
     return {
+      onPartialASR: (text) => {
+        // 仅在录音进行中把流式中间结果推给悬浮窗；下一次 listening 心跳会带上它一起渲染
+        if (this.state !== 'recording') return
+        this.overlayService.setStreamingText(text)
+      },
+
       onASR: (result) => {
         if (this.state !== 'processing') return
         if (this.finalHandledInCurrentRun) return
@@ -939,6 +976,7 @@ export class RecorderOrchestrator {
           appContext: activeAppContext,
           hotwords: this.cachedHotwords.length > 0 ? this.cachedHotwords : undefined,
           language: this.cachedLanguage || undefined,
+          streamingDisplay: this.cachedStreamingDisplay,
         }
       : {
           disableAi: !this.cachedAiEnabled,
@@ -946,6 +984,7 @@ export class RecorderOrchestrator {
           appContext: activeAppContext,
           hotwords: this.cachedHotwords.length > 0 ? this.cachedHotwords : undefined,
           language: this.cachedLanguage || undefined,
+          streamingDisplay: this.cachedStreamingDisplay,
         }
 
     // Wrap the async setup so stopRecording can wait for it
@@ -1037,6 +1076,9 @@ export class RecorderOrchestrator {
         return
       }
       this.startRecordingLock = false
+      // 若本次会走流式实时显示，录音一开始就让气泡显示占位，避免中途弹出+缩放导致的抖动。
+      // 实时读取供应商/WorkspaceId（避免切换供应商后缓存过期，导致非实时模型也弹气泡）。
+      void this.applyStreamingActive()
       this.overlayService.startListeningTicker()
       // 就绪提示音已触发，稍后再静音系统输出（避免把提示音一起静掉）
       this.scheduleSystemMuteIfEnabled()

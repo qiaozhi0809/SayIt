@@ -12,6 +12,9 @@ const OVERLAY_DEFAULT_BASE_WIDTH: f64 = 360.0;
 const OVERLAY_BASE_HEIGHT: f64 = 56.0;
 const OVERLAY_FALLBACK_WIDTH: f64 = 520.0;
 const OVERLAY_FALLBACK_HEIGHT: f64 = 224.0;
+// 流式实时显示：录音气泡 + 波形条堆叠，需要更宽更高的窗口
+const OVERLAY_STREAMING_WIDTH: f64 = 480.0;
+const OVERLAY_STREAMING_HEIGHT: f64 = 200.0;
 const OVERLAY_SCREEN_MARGIN: f64 = 8.0;
 const ACK_FIRST_TIMEOUT_MS: u64 = 1_200;
 const ACK_SECOND_TIMEOUT_MS: u64 = 700;
@@ -33,10 +36,31 @@ fn now_ms() -> i64 {
 enum OverlayLayout {
     Base,
     Fallback,
+    /// 流式实时显示：气泡 + 波形，窗口更大且非交互
+    Streaming,
+}
+
+impl OverlayLayout {
+    /// 该布局是否为可交互（可点击）状态——目前只有兜底卡片需要交互。
+    fn is_interactive(&self) -> bool {
+        matches!(self, OverlayLayout::Fallback)
+    }
+
+    /// 该布局期望的逻辑尺寸（宽, 高）。
+    fn dimensions(&self, base_width: f64) -> (f64, f64) {
+        match self {
+            OverlayLayout::Base => (base_width, OVERLAY_BASE_HEIGHT),
+            OverlayLayout::Fallback => (OVERLAY_FALLBACK_WIDTH, OVERLAY_FALLBACK_HEIGHT),
+            OverlayLayout::Streaming => (OVERLAY_STREAMING_WIDTH, OVERLAY_STREAMING_HEIGHT),
+        }
+    }
 }
 
 pub struct WindowState {
     overlay_layout: Mutex<OverlayLayout>,
+    /// 最近一次真正应用到原生窗口的布局。用于跳过重复的 set_position/set_size，
+    /// 避免监听期间每 33ms 重设一次窗口几何导致的抖动。
+    last_applied_layout: Mutex<Option<OverlayLayout>>,
     overlay_base_width: Mutex<f64>,
     overlay_monitor: Mutex<Option<MonitorBounds>>,
     overlay_lifecycle: Mutex<()>,
@@ -55,6 +79,7 @@ impl WindowState {
     pub fn new() -> Self {
         Self {
             overlay_layout: Mutex::new(OverlayLayout::Base),
+            last_applied_layout: Mutex::new(None),
             overlay_base_width: Mutex::new(OVERLAY_DEFAULT_BASE_WIDTH),
             overlay_monitor: Mutex::new(None),
             overlay_lifecycle: Mutex::new(()),
@@ -110,6 +135,8 @@ impl WindowState {
     pub fn hide_overlay(&self, app: &AppHandle) {
         self.active_show_id.store(0, Ordering::SeqCst);
         *self.overlay_monitor.lock().unwrap() = None;
+        // 下次显示需要重新应用几何。
+        *self.last_applied_layout.lock().unwrap() = None;
 
         let prev_layout = {
             let mut layout = self.overlay_layout.lock().unwrap();
@@ -134,11 +161,16 @@ impl WindowState {
         *self.latest_overlay_payload.lock().unwrap() = Some(data.clone());
 
         if let Some(overlay) = app.get_webview_window("overlay") {
-            let is_fallback = self.overlay_layout.lock().unwrap().clone() == OverlayLayout::Fallback;
-            self.apply_native_layout(app, &overlay, is_fallback);
-            set_overlay_interactivity(&overlay, is_fallback);
-            if is_fallback {
-                let _ = overlay.show();
+            let layout = self.overlay_layout.lock().unwrap().clone();
+            // 仅在布局真正变化时才重设原生窗口几何，避免每帧 set_position/set_size 抖动。
+            let changed = self.last_applied_layout.lock().unwrap().as_ref() != Some(&layout);
+            if changed {
+                let is_fallback = layout == OverlayLayout::Fallback;
+                self.apply_native_layout(app, &overlay, &layout);
+                set_overlay_interactivity(&overlay, layout.is_interactive());
+                if is_fallback {
+                    let _ = overlay.show();
+                }
             }
             self.emit_latest(app, false);
         }
@@ -256,8 +288,20 @@ impl WindowState {
             }
         }
 
-        let next_layout = if data.get("state").and_then(Value::as_str) == Some("fallback") {
+        let state = data.get("state").and_then(Value::as_str);
+        // streaming 标志在录音开始时即为真（气泡从一开始就在，避免中途弹出+缩放）；
+        // 兼容旧逻辑：有 streamingText 也算。
+        let streaming_on = data.get("streaming").and_then(Value::as_bool).unwrap_or(false)
+            || data
+                .get("streamingText")
+                .and_then(Value::as_str)
+                .map(|s| !s.trim().is_empty())
+                .unwrap_or(false);
+        let next_layout = if state == Some("fallback") {
             OverlayLayout::Fallback
+        } else if state == Some("listening") && streaming_on {
+            // 录音中开启了实时显示 → 放大窗口容纳气泡（整段录音保持该尺寸，中途不再缩放）
+            OverlayLayout::Streaming
         } else {
             OverlayLayout::Base
         };
@@ -300,7 +344,7 @@ impl WindowState {
         // WebviewWindowBuilder 的 label 注册与 Manager 句柄可见性不是原子操作。
         // 多个 present 并发时若都看到 handle=MISSING，会争抢同一 "overlay" label。
         let _lifecycle_guard = self.overlay_lifecycle.lock().unwrap();
-        let is_fallback = self.overlay_layout.lock().unwrap().clone() == OverlayLayout::Fallback;
+        let layout = self.overlay_layout.lock().unwrap().clone();
         let base_width = *self.overlay_base_width.lock().unwrap();
 
         let Some(overlay) = app.get_webview_window("overlay") else {
@@ -308,14 +352,14 @@ impl WindowState {
                 "[overlay-health] handle missing show_id={} — creating",
                 show_id,
             ));
-            self.create_overlay(app, is_fallback, base_width);
+            self.create_overlay(app, layout, base_width);
             return false;
         };
 
-        let position_error = self.apply_native_layout(app, &overlay, is_fallback);
+        let position_error = self.apply_native_layout(app, &overlay, &layout);
         let show_error = overlay.show().err().map(|error| format!("{:?}", error));
         let top_error = overlay.set_always_on_top(true).err().map(|error| format!("{:?}", error));
-        set_overlay_interactivity(&overlay, is_fallback);
+        set_overlay_interactivity(&overlay, layout.is_interactive());
 
         let snapshot = overlay_window_snapshot(app);
         if position_error.is_some() || show_error.is_some() || top_error.is_some() {
@@ -336,13 +380,15 @@ impl WindowState {
         &self,
         app: &AppHandle,
         overlay: &tauri::WebviewWindow,
-        is_fallback: bool,
+        layout: &OverlayLayout,
     ) -> Option<String> {
+        // 记录本次应用的布局，供 update_overlay_state 判重、跳过无谓的窗口重设。
+        *self.last_applied_layout.lock().unwrap() = Some(layout.clone());
         let base_width = *self.overlay_base_width.lock().unwrap();
         let target_monitor = self.overlay_monitor.lock().unwrap().clone();
         if let Some(bounds) = target_monitor
             .as_ref()
-            .and_then(|value| calc_monitor_overlay_bounds(app, value, is_fallback, base_width))
+            .and_then(|value| calc_monitor_overlay_bounds(app, value, layout, base_width))
         {
             let position_error = overlay.set_position(tauri::Position::Physical(
                 tauri::PhysicalPosition::new(bounds.0, bounds.1),
@@ -358,7 +404,7 @@ impl WindowState {
             };
         }
 
-        let bounds = calc_overlay_bounds(app, is_fallback, base_width);
+        let bounds = calc_overlay_bounds(app, layout, base_width);
         let position_error = overlay.set_position(tauri::Position::Logical(
             tauri::LogicalPosition::new(bounds.0, bounds.1),
         )).err();
@@ -413,13 +459,13 @@ impl WindowState {
             return;
         }
 
-        let is_fallback = self.overlay_layout.lock().unwrap().clone() == OverlayLayout::Fallback;
+        let layout = self.overlay_layout.lock().unwrap().clone();
         let base_width = *self.overlay_base_width.lock().unwrap();
-        self.create_overlay(app, is_fallback, base_width);
+        self.create_overlay(app, layout, base_width);
     }
 
-    fn create_overlay(&self, app: &AppHandle, is_fallback: bool, base_width: f64) {
-        let bounds = calc_overlay_bounds(app, is_fallback, base_width);
+    fn create_overlay(&self, app: &AppHandle, layout: OverlayLayout, base_width: f64) {
+        let bounds = calc_overlay_bounds(app, &layout, base_width);
         let builder = WebviewWindowBuilder::new(
             app,
             "overlay",
@@ -439,8 +485,8 @@ impl WindowState {
 
         match builder.build() {
             Ok(overlay) => {
-                let position_error = self.apply_native_layout(app, &overlay, is_fallback);
-                set_overlay_interactivity(&overlay, is_fallback);
+                let position_error = self.apply_native_layout(app, &overlay, &layout);
+                set_overlay_interactivity(&overlay, layout.is_interactive());
                 let show_error = overlay.show().err().map(|error| format!("{:?}", error));
                 write_log_line(&format!(
                     "[overlay-health] create OK show_id={} generation={} initial_bounds={:?} position_error={:?} show_error={:?} visible={}",
@@ -606,12 +652,8 @@ fn monitor_info(app: &AppHandle) -> (f64, f64, f64) {
     }
 }
 
-fn calc_overlay_bounds(app: &AppHandle, is_fallback: bool, base_width: f64) -> (f64, f64, f64, f64) {
-    let (desired_width, desired_height) = if is_fallback {
-        (OVERLAY_FALLBACK_WIDTH, OVERLAY_FALLBACK_HEIGHT)
-    } else {
-        (base_width, OVERLAY_BASE_HEIGHT)
-    };
+fn calc_overlay_bounds(app: &AppHandle, layout: &OverlayLayout, base_width: f64) -> (f64, f64, f64, f64) {
+    let (desired_width, desired_height) = layout.dimensions(base_width);
     let (screen_width, screen_height, _) = monitor_info(app);
     let width = desired_width.min(screen_width - 40.0).max(160.0);
     let height = desired_height.min(screen_height - 40.0).max(56.0);
@@ -624,7 +666,7 @@ fn calc_overlay_bounds(app: &AppHandle, is_fallback: bool, base_width: f64) -> (
 fn calc_monitor_overlay_bounds(
     app: &AppHandle,
     target: &MonitorBounds,
-    is_fallback: bool,
+    layout: &OverlayLayout,
     base_width: f64,
 ) -> Option<(i32, i32, u32, u32)> {
     let center_x = target.left as i64 + (target.right as i64 - target.left as i64) / 2;
@@ -650,11 +692,7 @@ fn calc_monitor_overlay_bounds(
     let bottom_gap = (72.0 * scale).round().max(margin as f64) as i64;
     let available_width = (work_width - margin * 2).max(1);
     let available_height = (work_height - margin * 2).max(1);
-    let (desired_width, desired_height) = if is_fallback {
-        (OVERLAY_FALLBACK_WIDTH, OVERLAY_FALLBACK_HEIGHT)
-    } else {
-        (base_width, OVERLAY_BASE_HEIGHT)
-    };
+    let (desired_width, desired_height) = layout.dimensions(base_width);
     let width = ((desired_width * scale).round().max(1.0) as i64).min(available_width);
     let height = ((desired_height * scale).round().max(1.0) as i64).min(available_height);
     let x = target.left as i64 + ((work_width - width) / 2);

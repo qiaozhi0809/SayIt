@@ -32,3 +32,23 @@ const ASR_DISPLAY_MODEL_MAP: Record<string, string> = {
 export function resolveAsrDisplayModel(providerKey: string): string {
   return ASR_DISPLAY_MODEL_MAP[providerKey] || providerKey || 'unknown'
 }
+
+/** 判断某个 ASR 供应商是否为「可能支持」流式实时显示的模型（不含运行时前置条件）。
+ *  注意：qwen3-asr-flash（qwen）是非实时 HTTP 模型，不支持；只有 qwen3-asr-flash-realtime 支持。 */
+export function isStreamingDisplayCapable(provider: string): boolean {
+  return provider === 'doubao_v2' || provider === 'qwen_realtime'
+}
+
+/**
+ * 判断当前配置下「流式实时显示」是否真正就绪可用（含运行时前置条件）。
+ * - doubao_v2：直接可用（需在火山开通「流式语音识别 2.0」，运行时由服务端校验）。
+ * - qwen_realtime（qwen3-asr-flash-realtime）：走地域专属实时端点，必须提供北京业务空间 WorkspaceId 才可用。
+ * - qwen（qwen3-asr-flash）：非实时模型，不支持实时字幕。
+ */
+export function isStreamingDisplayReady(provider: string, qwenWorkspaceId?: string): boolean {
+  if (provider === 'doubao_v2') return true
+  if (provider === 'qwen_realtime') {
+    return Boolean(qwenWorkspaceId && qwenWorkspaceId.trim())
+  }
+  return false
+}

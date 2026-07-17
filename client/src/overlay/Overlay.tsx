@@ -18,6 +18,8 @@ interface OverlayPayload {
   errorMessage?: string
   warning?: string
   toastText?: string
+  streaming?: boolean
+  streamingText?: string
   _overlayShowId?: number
   _overlayGeneration?: number
   _overlayProbe?: boolean
@@ -74,6 +76,8 @@ export default function Overlay() {
   const [fallbackText, setFallbackText] = useState('')
   const [errorMessage, setErrorMessage] = useState('')
   const [toastText, setToastText] = useState('')
+  const [streamingText, setStreamingText] = useState('')
+  const [streamingOn, setStreamingOn] = useState(false)
   const [copied, setCopied] = useState(false)
   const [thinkingDuration, setThinkingDuration] = useState(0)
   const [warning, setWarning] = useState('')
@@ -107,6 +111,9 @@ export default function Overlay() {
         setState(payload.state)
         if (payload.state !== 'listening') {
           setBars((prev) => Array(prev.length).fill(3))
+          // 离开录音状态即清空实时文字气泡
+          setStreamingText('')
+          setStreamingOn(false)
         }
         setCopied(false)
         if (payload.state !== 'fallback' && hideTimerRef.current) {
@@ -130,9 +137,13 @@ export default function Overlay() {
       if (typeof payload.errorMessage === 'string') setErrorMessage(payload.errorMessage)
       if (typeof payload.toastText === 'string') setToastText(payload.toastText)
       if (typeof payload.warning === 'string') setWarning(payload.warning)
+      if (typeof payload.streamingText === 'string') setStreamingText(payload.streamingText)
+      if (typeof payload.streaming === 'boolean') setStreamingOn(payload.streaming)
       if (payload.state === 'waiting') {
         setElapsedSec(0)
         setWarning('')
+        setStreamingText('')
+        setStreamingOn(false)
         setBars((prev) => Array(prev.length).fill(3))
       }
 
@@ -194,6 +205,9 @@ export default function Overlay() {
       }
     }
   }, [])
+
+  const showStreamingBubble = state === 'listening' && (streamingOn || streamingText.trim().length > 0)
+  const hasStreamingText = streamingText.trim().length > 0
 
   const timerText = useMemo(() => `${Math.floor(elapsedSec)}s`, [elapsedSec])
   const timerColor = getTimerColor(theme)
@@ -261,8 +275,53 @@ export default function Overlay() {
           </div>
         </div>
       ) : (
+        <div data-overlay-content className="flex flex-col items-center gap-2">
+          {showStreamingBubble && (
+            <div
+              className="pointer-events-none relative flex max-w-[440px] flex-col rounded-2xl border px-4 py-2.5"
+              style={{
+                background: 'var(--overlay-bg)',
+                color: 'var(--overlay-text)',
+                borderColor: 'var(--overlay-border)',
+              }}
+            >
+              <span
+                className="mb-1 text-[10px] font-medium tracking-[0.18em]"
+                style={{ color: 'var(--overlay-text-muted)' }}
+              >
+                实时识别
+              </span>
+              {/* 内容驱动尺寸：小默认，随文字增行慢慢变大，超过 3 行才滚动，只显示最新内容 */}
+              <div
+                className="flex max-h-[72px] flex-col justify-end overflow-hidden text-left text-sm leading-6"
+                style={{ color: hasStreamingText ? 'var(--overlay-text)' : 'var(--overlay-text-dim)' }}
+              >
+                <div>
+                  {hasStreamingText ? streamingText : '正在聆听…'}
+                  {hasStreamingText && (
+                    <span
+                      className="ml-0.5 inline-block h-[1.05em] w-[2px] rounded-full align-middle"
+                      style={{
+                        backgroundColor: 'var(--overlay-text)',
+                        animation: 'caret-blink 1.1s ease-in-out infinite',
+                      }}
+                    />
+                  )}
+                </div>
+              </div>
+              {/* 底部朝下尖角：提示文字来自下方的录音胶囊 */}
+              <span
+                className="absolute left-1/2 h-0 w-0 -translate-x-1/2"
+                style={{
+                  bottom: '-7px',
+                  borderLeft: '7px solid transparent',
+                  borderRight: '7px solid transparent',
+                  borderTop: '7px solid var(--overlay-bg)',
+                }}
+              />
+            </div>
+          )}
         <div
-          data-overlay-content
           className="flex items-center rounded-full border px-4 py-2"
           style={{
             background: 'var(--overlay-bg)',
@@ -351,6 +410,7 @@ export default function Overlay() {
               </span>
             </div>
           )}
+        </div>
         </div>
       )}
     </div>

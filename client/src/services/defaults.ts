@@ -55,6 +55,11 @@ export const DEFAULTS: Record<string, unknown> = {
   overlayShowDuration: true, // 是否显示录音时长。可选: true | false
   overlayWidth: 'short', // 可选: 'short' | 'medium' | 'long'
 
+  // ── 流式实时显示 ──
+  // 打开后，支持流式的 ASR 模型（豆包、千问实时）在识别阶段会把实时文字显示在悬浮窗上。
+  // 识别完成后文本仍会照常交给 AI 处理。可选: true | false
+  streamingDisplayEnabled: false,
+
   // ── 提示音 ──
   readySoundEnabled: true, // 录音就绪提示音。可选: true | false
 

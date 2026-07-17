@@ -25,6 +25,28 @@ pub fn build_hotword_context_text(hotwords: &[String]) -> Option<String> {
     Some(words.join("、"))
 }
 
+/// 去掉常见分隔符/空白后用于比较（判断是否为热词上下文的原样回显）。
+fn normalize_for_echo(s: &str) -> String {
+    s.chars()
+        .filter(|c| !c.is_whitespace() && !"、,，;；。.·/|\\".contains(*c))
+        .collect()
+}
+
+/// 若识别文本去分隔符后恰好等于传入的热词上下文（去分隔符），判为热词回显幻觉，返回空串。
+fn strip_hotword_echo(text: String, hotword_context: &str) -> String {
+    if hotword_context.trim().is_empty() {
+        return text;
+    }
+    let t = normalize_for_echo(&text);
+    if t.is_empty() {
+        return text;
+    }
+    if t == normalize_for_echo(hotword_context) {
+        return String::new();
+    }
+    text
+}
+
 fn pcm_to_wav(pcm: &[u8], sr: u32) -> Vec<u8> {
     let ds = pcm.len() as u32;
     let mut w = Vec::with_capacity(44 + pcm.len());
@@ -113,6 +135,10 @@ pub async fn transcribe(
         .and_then(|t| t.as_str())
         .unwrap_or("")
         .to_string();
+
+    // 防热词回显：极短/静音音频下，模型有时会把作为上下文传入的热词原样吐出来。
+    // 若识别结果去掉分隔符后恰好等于我们传入的热词上下文，判为幻觉，返回空。
+    let text = strip_hotword_echo(text, &system_text);
 
     Ok(AsrResult { text, elapsed_ms })
 }

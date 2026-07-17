@@ -27,6 +27,8 @@ export interface FinalResult {
 export interface TranscriptionCallbacks {
   onStateChange?: (state: ProviderState) => void
   onReady?: (info: { connectionId?: string; asr: boolean; llm: boolean }) => void
+  /** 流式识别过程中的中间结果（实时上屏用），text 为到目前为止的累计文本 */
+  onPartialASR?: (text: string) => void
   onASR?: (result: ASRResult) => void
   onFinal?: (result: FinalResult) => void
   onDone?: () => void
@@ -41,6 +43,8 @@ export interface StartOptions {
   source?: 'live' | 'history_reprocess'
   hotwords?: string[]
   language?: string
+  /** 是否开启流式实时显示：识别过程中把中间结果实时推给悬浮窗 */
+  streamingDisplay?: boolean
 }
 
 export interface StopOptions {

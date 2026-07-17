@@ -43,6 +43,11 @@ export function setActivePresetCache(id: string) {
   orchestrator.setActivePresetCache(id)
 }
 
+/** 轻量：仅同步「流式实时显示」开关到录音器缓存，无 IPC，切换后立即生效 */
+export function setStreamingDisplayCache(next: boolean) {
+  orchestrator.setStreamingDisplayCache(next)
+}
+
 /** 仅刷新 overlay 显示设置（主题/长度/时长）— 轻量，避免触发全量录音缓存刷新 */
 export async function refreshOverlaySettings() {
   await orchestrator.refreshOverlaySettings()

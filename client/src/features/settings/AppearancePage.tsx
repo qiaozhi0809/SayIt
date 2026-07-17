@@ -1,12 +1,14 @@
 // 外观设置页面 — 主题 + 悬浮窗样式 + 预览
 
 import { useEffect, useRef, useState } from 'react'
+import { open as shellOpen } from '@tauri-apps/plugin-shell'
+import { ExternalLink } from 'lucide-react'
 import { Card, CardContent } from '@/components/ui/card'
 import { Switch } from '@/components/ui/switch'
 import { themeList } from '@/themes'
 import { switchTheme, getActiveThemeId } from '@/stores/theme'
 import { getSetting, setSetting } from '@/services/store'
-import { refreshOverlaySettings } from '@/services/recorder'
+import { refreshOverlaySettings, setStreamingDisplayCache } from '@/services/recorder'
 import { OVERLAY_WIDTH_PRESETS, type OverlayWidthPreset } from '@/services/recorder/types'
 import { type OverlayWaveTheme } from './utils'
 
@@ -45,8 +47,35 @@ function getTimerColor(theme: OverlayWaveTheme): string {
   return '#bae6fd'
 }
 
-function OverlayPreview({ theme, showDuration, barCount }: { theme: OverlayWaveTheme; showDuration: boolean; barCount: number }) {
+
+
+const STREAMING_PREVIEW_TEXT = '今天下午三点和团队开个会，把新版本的方案先过一遍'
+
+function OverlayPreview({ theme, showDuration, barCount, streaming }: { theme: OverlayWaveTheme; showDuration: boolean; barCount: number; streaming: boolean }) {
   const barRefs = useRef<Array<HTMLDivElement | null>>([])
+  const [typed, setTyped] = useState('')
+
+  // 流式预览：循环把示例文字一个字一个字打出来，模拟"边说边出字"的动态效果
+  useEffect(() => {
+    if (!streaming) {
+      setTyped('')
+      return
+    }
+    let i = 0
+    let timer: ReturnType<typeof setTimeout>
+    const step = () => {
+      if (i <= STREAMING_PREVIEW_TEXT.length) {
+        setTyped(STREAMING_PREVIEW_TEXT.slice(0, i))
+        i += 1
+        timer = setTimeout(step, 130)
+      } else {
+        // 打完停顿一下再从头循环
+        timer = setTimeout(() => { i = 0; step() }, 1600)
+      }
+    }
+    step()
+    return () => clearTimeout(timer)
+  }, [streaming])
 
   useEffect(() => {
     const heights = new Array(barCount).fill(3)
@@ -81,6 +110,27 @@ function OverlayPreview({ theme, showDuration, barCount }: { theme: OverlayWaveT
 
   return (
     <div className="flex flex-col items-center gap-3">
+      {/* 流式实时字幕气泡（开启时显示，带打字动画） */}
+      {streaming && (
+        <div className="relative w-[260px] rounded-2xl border border-slate-600 bg-black px-3.5 py-2.5 shadow-[0_6px_16px_rgba(0,0,0,0.35)]">
+          <span className="mb-1 block text-[10px] font-medium tracking-[0.18em] text-slate-400">实时识别</span>
+          {/* 内容驱动、底部对齐，和真实悬浮窗一致 */}
+          <div className="flex max-h-[40px] flex-col justify-end overflow-hidden text-left text-[13px] leading-5 text-slate-100">
+            <div>
+              {typed}
+              <span
+                className="ml-0.5 inline-block h-[1.05em] w-[2px] rounded-full align-middle"
+                style={{ backgroundColor: '#f1f5f9', animation: 'caret-blink 1.1s ease-in-out infinite' }}
+              />
+            </div>
+          </div>
+          {/* 朝下尖角，指向下方录音胶囊 */}
+          <span
+            className="absolute left-1/2 -translate-x-1/2"
+            style={{ bottom: '-7px', width: 0, height: 0, borderLeft: '7px solid transparent', borderRight: '7px solid transparent', borderTop: '7px solid #000' }}
+          />
+        </div>
+      )}
       {/* 1:1 还原真实悬浮窗样式 */}
       <div className="flex items-center rounded-full border border-slate-600 bg-black px-4 py-2 shadow-[0_6px_16px_rgba(0,0,0,0.35)]">
         <div className="flex items-center gap-[2px]" style={{ height: '20px' }}>
@@ -120,6 +170,7 @@ export default function AppearancePage() {
   const [overlayWaveTheme, setOverlayWaveTheme] = useState<OverlayWaveTheme>('black-rainbow')
   const [overlayShowDuration, setOverlayShowDuration] = useState(true)
   const [overlayWidth, setOverlayWidth] = useState<OverlayWidthPreset>('medium')
+  const [streamingDisplay, setStreamingDisplay] = useState(false)
 
   useEffect(() => {
     getSetting('overlayWaveTheme', 'black-rainbow').then((value) => {
@@ -131,6 +182,7 @@ export default function AppearancePage() {
       const v = value as OverlayWidthPreset
       if (v === 'short' || v === 'medium' || v === 'long') setOverlayWidth(v)
     })
+    getSetting('streamingDisplayEnabled', false).then((value) => setStreamingDisplay(Boolean(value)))
   }, [])
 
   const handleThemeChange = async (themeId: string) => {
@@ -155,6 +207,13 @@ export default function AppearancePage() {
     setOverlayWidth(preset)
     await setSetting('overlayWidth', preset)
     await refreshOverlaySettings()
+  }
+
+  const handleToggleStreamingDisplay = () => {
+    const next = !streamingDisplay
+    setStreamingDisplay(next)
+    setStreamingDisplayCache(next) // 立即同步录音器缓存，无需重启即可生效
+    void setSetting('streamingDisplayEnabled', next)
   }
 
   return (
@@ -258,8 +317,30 @@ export default function AppearancePage() {
                   <Switch checked={overlayShowDuration} onChange={handleToggleDuration} />
                 </div>
 
+                <div className="mt-4 flex items-center justify-between">
+                  <div className="pr-3">
+                    <p className="text-sm font-medium">流式实时字幕</p>
+                    <p className="text-xs text-muted-foreground">
+                      说话时在悬浮窗上实时显示识别文字
+                      <span className="text-muted-foreground/70">
+                        （支持豆包、千问实时 ASR；豆包需开通「流式语音识别 2.0」
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => void shellOpen('https://console.volcengine.com/speech/new/setting/activate?projectName=default')}
+                        className="inline-flex items-center gap-0.5 text-primary underline underline-offset-2 decoration-primary/50 transition-colors hover:decoration-primary"
+                      >
+                        前往开通
+                        <ExternalLink className="h-3 w-3" />
+                      </button>
+                      <span className="text-muted-foreground/70">，千问需填业务空间 ID）</span>
+                    </p>
+                  </div>
+                  <Switch checked={streamingDisplay} onChange={handleToggleStreamingDisplay} />
+                </div>
+
                 <div className="mt-4 flex justify-center">
-                  <OverlayPreview theme={overlayWaveTheme} showDuration={overlayShowDuration} barCount={OVERLAY_WIDTH_PRESETS[overlayWidth].barCount} />
+                  <OverlayPreview theme={overlayWaveTheme} showDuration={overlayShowDuration} barCount={OVERLAY_WIDTH_PRESETS[overlayWidth].barCount} streaming={streamingDisplay} />
                 </div>
               </div>
             </div>

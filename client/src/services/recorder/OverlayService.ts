@@ -30,6 +30,10 @@ export class OverlayService {
   private fallbackHideId: ReturnType<typeof setTimeout> | null = null
   /** Persistent warning text — included in every overlay update until cleared */
   private activeWarning = ''
+  /** 流式实时识别文本 — 录音期间随中间结果更新，会被并入每次 listening 更新一起下发 */
+  private streamingText = ''
+  /** 本次录音是否开启流式实时显示：为真则从录音一开始就显示气泡（占位），中途不再缩放窗口 */
+  private streamingActive = false
 
   constructor(private readonly getElapsedSec: () => number) {}
 
@@ -106,9 +110,28 @@ export class OverlayService {
         state: 'listening',
         elapsedSec: clampSec(this.getElapsedSec()),
         ...(this.activeWarning ? { warning: this.activeWarning } : {}),
+        ...(this.streamingActive ? { streaming: true } : {}),
+        ...(this.streamingText ? { streamingText: this.streamingText } : {}),
         ...this.getCommonPayload(),
       })
     }, 33)
+  }
+
+  /** 设置本次录音是否开启流式实时显示（录音开始时调用）。开启后气泡从一开始就显示占位。 */
+  setStreamingActive(on: boolean) {
+    this.streamingActive = on
+  }
+
+  /** 更新流式实时识别文本。下一次 listening 心跳（33ms）会把它带给悬浮窗一起渲染。
+   *  传空字符串可清除气泡。 */
+  setStreamingText(text: string) {
+    this.streamingText = text || ''
+  }
+
+  /** 清除流式实时文本与激活标志（录音停止 / 重置时调用）。 */
+  resetStreamingText() {
+    this.streamingText = ''
+    this.streamingActive = false
   }
 
   stopListeningTicker() {
@@ -127,6 +150,8 @@ export class OverlayService {
       bars,
       elapsedSec: clampSec(this.getElapsedSec()),
       ...(this.activeWarning ? { warning: this.activeWarning } : {}),
+      ...(this.streamingActive ? { streaming: true } : {}),
+      ...(this.streamingText ? { streamingText: this.streamingText } : {}),
       ...this.getCommonPayload(),
     })
   }
@@ -235,6 +260,7 @@ export class OverlayService {
   dispose() {
     this.stopListeningTicker()
     this.clearFallbackHideTimer()
+    this.resetStreamingText()
     void bridge.hideOverlay()
   }
 }

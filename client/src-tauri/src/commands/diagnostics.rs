@@ -109,9 +109,13 @@ fn parse_log_line(line: &str) -> Option<TimelineEntry> {
         return None;
     }
 
-    // 提取 timestamp
+    // 提取 timestamp。个别行可能是 [[2026-...]] 这种多方括号开头，去掉前导 '[' 并校验，
+    // 否则带 '[' 的时间戳字符串排序会排到最后，污染「覆盖记录终点」显示。
     let ts_end = line.find(']')?;
-    let ts = &line[1..ts_end];
+    let ts = line[1..ts_end].trim_start_matches('[').trim();
+    if ts.is_empty() || !ts.as_bytes()[0].is_ascii_digit() {
+        return None;
+    }
 
     let rest = line[ts_end + 1..].trim_start();
     if !rest.starts_with('[') {

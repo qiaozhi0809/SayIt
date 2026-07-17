@@ -85,6 +85,48 @@ export const BUILTIN_APP_RULES: AppPromptRule[] = [
       windowTitleIncludes: ['记事本', 'notepad'],
     },
   },
+  {
+    id: 'codex',
+    appId: 'codex',
+    name: 'Codex',
+    builtin: true,
+    enabled: false,
+    priority: 88,
+    presetId: 'faithful',
+    promptAppend: '面向 Codex 编码工具，多为用自然语言下达编程指令。保留代码、命令、文件名、路径和英文标识符，把要做的事说清楚，不要把技术词改写成普通中文。',
+    matcher: {
+      processNames: ['codex.exe'],
+      windowTitleIncludes: ['codex'],
+    },
+  },
+  {
+    id: 'weixin',
+    appId: 'weixin',
+    name: '微信',
+    builtin: true,
+    enabled: false,
+    priority: 68,
+    presetId: 'casual',
+    promptAppend: '适合微信聊天。输出可直接发送的自然口语短消息，简洁亲切，不要用书面或邮件腔。',
+    matcher: {
+      processNames: ['weixin.exe', 'wechat.exe'],
+      windowTitleIncludes: ['微信', 'weixin', 'wechat'],
+    },
+  },
+  {
+    id: 'qq',
+    appId: 'qq',
+    name: 'QQ',
+    builtin: true,
+    enabled: false,
+    priority: 66,
+    presetId: 'casual',
+    promptAppend: '适合 QQ 聊天。输出轻松自然、可直接发送的短消息，口语化、简洁。',
+    matcher: {
+      processNames: ['qq.exe'],
+      windowTitleIncludes: ['qq'],
+    },
+  },
 ]
 
 export function createDefaultUserStats(): UserStats {
