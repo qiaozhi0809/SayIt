@@ -82,12 +82,10 @@ function checkAsrKeyFormat(provider: string, key: string): string {
   const k = key.trim()
   if (!k) return ''
   if (provider === 'doubao_v2' || provider === 'doubao') {
-    // 豆包 Access Token：32 位字母数字
-    if (!/^[A-Za-z0-9]+$/.test(k)) {
-      return '豆包 Access Token 通常为纯字母数字组合，请确认是否包含了多余字符'
-    }
-    if (k.length !== 32) {
-      return `豆包 Access Token 通常为 32 位（当前 ${k.length} 位），请确认是否正确`
+    // 豆包 Access Token 可能包含字母、数字以及 - _ 等符号，长度也不固定，
+    // 只在出现空白字符（多为粘贴时带进的空格/换行）等明显异常时提示。
+    if (/\s/.test(k)) {
+      return '豆包 Access Token 不应包含空格或换行，请确认是否粘贴了多余字符'
     }
   } else if (provider === 'mimo') {
     // 小米 MiMo API Key 无公开固定格式约定，不做格式校验

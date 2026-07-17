@@ -22,6 +22,13 @@ describe('convertChineseNumbers', () => {
     expect(convertChineseNumbers('用的是GPT五点四')).toBe('用的是GPT 5.4')
   })
 
+  it('多段点分数字（版本号）', () => {
+    expect(convertChineseNumbers('升级到零点一点零')).toBe('升级到0.1.0')
+    expect(convertChineseNumbers('版本一点二点三')).toBe('版本1.2.3')
+    expect(convertChineseNumbers('三点一四不变')).toBe('3.14不变')
+    expect(convertChineseNumbers('从零点九点五到一点零点零')).toBe('从0.9.5到1.0.0')
+  })
+
   it('分之 → 分数', () => {
     expect(convertChineseNumbers('五分之二')).toBe('2/5')
     expect(convertChineseNumbers('千分之五')).toBe('5/1000')

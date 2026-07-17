@@ -142,12 +142,21 @@ export function convertChineseNumbers(text: string): string {
     },
   )
 
-  // 3. 小数：数字点数字 → N.N（小数部分逐位）
+  // 3. 小数 / 多段点分数字：数字点数字(点数字)* → N.N 或 N.N.N
+  //    单段是普通小数（三点一四 → 3.14）；多段是版本号等（零点一点零 → 0.1.0），每段逐位读。
   result = result.replace(
-    new RegExp(`([${NUM_CHARS}]+)点([${DIGIT_CHARS}]+)`, 'g'),
-    (m: string, intp: string, decp: string, offset: number, str: string) => {
-      const val = parseNumberExpr(`${intp}点${decp}`)
-      return val === null ? m : maybeSpace(str, offset, val)
+    new RegExp(`([${NUM_CHARS}]+)((?:点[${DIGIT_CHARS}]+)+)`, 'g'),
+    (m: string, intp: string, rest: string, offset: number, str: string) => {
+      const intVal = parseChineseInteger(intp)
+      if (intVal === null) return m
+      const groups = rest.split('点').filter((g: string) => g.length > 0)
+      let out = String(intVal)
+      for (const g of groups) {
+        let dec = ''
+        for (const ch of g) dec += String(CN_DIGITS[ch])
+        out += `.${dec}`
+      }
+      return maybeSpace(str, offset, out)
     },
   )
 
