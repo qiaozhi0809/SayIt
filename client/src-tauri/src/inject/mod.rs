@@ -638,11 +638,55 @@ unsafe fn native_set_clipboard_text(text: &str) -> bool {
         let _ = GlobalUnlock(hmem);
 
         // CF_UNICODETEXT = 13
-        SetClipboardData(13, HANDLE(hmem.0 as *mut _)).is_ok()
+        let ok = SetClipboardData(13, HANDLE(hmem.0 as *mut _)).is_ok();
+
+        // 标记本次剪贴板内容「不进入 Win+V 历史 / 不上传云剪贴板」。
+        // 否则每次插入文本都会往剪贴板历史里塞一条（配合「保护剪贴板」还原时甚至塞两条）。
+        // 与浏览器无痕模式、密码管理器用的是同一套机制。失败不影响粘贴，忽略即可。
+        mark_clipboard_history_excluded();
+
+        ok
     })();
 
     let _ = CloseClipboard();
     result
+}
+
+/// 往当前剪贴板会话写入排除标记，阻止内容进入剪贴板历史(Win+V)与云剪贴板。
+/// 必须在 OpenClipboard/EmptyClipboard 之后、CloseClipboard 之前调用。
+#[cfg(windows)]
+unsafe fn mark_clipboard_history_excluded() {
+    use windows::core::PCWSTR;
+    use windows::Win32::System::DataExchange::RegisterClipboardFormatW;
+
+    // 写一个 4 字节值为 0 的 DWORD 到指定格式。
+    let write_dword_format = |format_name: &[u16], value: u32| {
+        let fmt = RegisterClipboardFormatW(PCWSTR(format_name.as_ptr()));
+        if fmt == 0 { return; }
+        let hmem = match GlobalAlloc(GMEM_MOVEABLE, 4) {
+            Ok(h) => h,
+            Err(_) => return,
+        };
+        let locked = GlobalLock(hmem);
+        if locked.is_null() { return; }
+        std::ptr::copy_nonoverlapping(&value as *const u32 as *const u8, locked as *mut u8, 4);
+        let _ = GlobalUnlock(hmem);
+        // 标记写失败几乎不会发生；与上面 CF_UNICODETEXT 的处理一致，失败时不额外释放。
+        let _ = SetClipboardData(fmt, HANDLE(hmem.0 as *mut _));
+    };
+
+    // "CanIncludeInClipboardHistory" = 0 → 不进 Win+V 历史
+    let hist: Vec<u16> = "CanIncludeInClipboardHistory\0".encode_utf16().collect();
+    write_dword_format(&hist, 0);
+
+    // "CanUploadToCloudClipboard" = 0 → 不同步到云剪贴板
+    let cloud: Vec<u16> = "CanUploadToCloudClipboard\0".encode_utf16().collect();
+    write_dword_format(&cloud, 0);
+
+    // "ExcludeClipboardContentFromMonitorProcessing" → 兜底：整体排除监控处理
+    // 该格式只要存在即生效，值内容不限，这里同样写 0。
+    let exclude: Vec<u16> = "ExcludeClipboardContentFromMonitorProcessing\0".encode_utf16().collect();
+    write_dword_format(&exclude, 0);
 }
 
 #[cfg(windows)]
