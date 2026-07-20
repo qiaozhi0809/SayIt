@@ -272,6 +272,7 @@ pub fn is_likely_editable_pub(ctx: &context::AppContext) -> bool {
         "chrome", "msedge", "firefox", "opera", "brave",
         "teams", "wechat", "dingtalk", "slack",
         "windowsterminal", "cmd", "powershell",
+        "warp", "alacritty", "wezterm", "hyper", "tabby", "kitty",
         "explorer",
         "mobaxterm", "putty", "securecrt", "xshell",
     ];
